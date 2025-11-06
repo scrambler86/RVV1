@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -17,7 +17,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     [Header("Diagnostics")]
     [Tooltip("If false, CRC mismatch warnings are suppressed at runtime (kept in Editor/Dev builds).")]
     public bool enableCrcWarnings = false;
-
 
     // ---- Quit guard (no RPC during shutdown) ----
     private static bool s_AppQuitting = false;
@@ -50,8 +49,10 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     public float hardSnapRateLimitSeconds = 1.0f;
 
     [Header("FEC parity (full-keyframe)")]
-    [Tooltip("Number of parity shards (simple XOR). 0 = disabled")] public int fecParityShards = 1;
-    [Tooltip("Max bytes per shard during splitting")] public int fecShardSize = 1024;
+    [Tooltip("Number of parity shards (simple XOR). 0 = disabled")]
+    public int fecParityShards = 1;
+    [Tooltip("Max bytes per shard during splitting")]
+    public int fecShardSize = 1024;
 
     [Header("Elastic correction (client)")]
     public float correctionDurationSeconds = 0.25f;
@@ -109,6 +110,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     public uint LastSeqReceived => _lastSeqReceived;
     public void SetLastSeqReceived(uint seq) => _lastSeqReceived = seq;
     public double ClientRttMs => _lastRttMs;
+
     public bool HasInputAuthority(bool allowServerFallback)
     {
         var nob = NetworkObject;
@@ -188,6 +190,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     private const double FULL_RETRY_SECONDS = 0.6;
     private const int FULL_RETRY_MAX = 4;
 
+    // ---------- Full snapshot request window (client-side) ----------
     private double _lastFullRequestTime = -9999.0;
     private double _fullRequestWindowStart = -9999.0;
     private int _fullRequestWindowCount = 0;
@@ -204,36 +207,34 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     private float _elasticDuration = 0f;
     private float _elasticCurrentMultiplier = 1f;
 
-    // ---------- CRC rate-limited logging (no blocking) ----------
+    // ---------- CRC rate-limited logging ----------
     private int _crcFailCount = 0;
     private double _crcFirstFailTime = -1.0;
     private double _crcLastLogTime = -9999.0;
-    private const double CRC_LOG_WINDOW_SECONDS = 5.0; // window to accumulate events
-    private const int CRC_LOG_MAX_PER_WINDOW = 5; // max logs emitted per window
+    private const double CRC_LOG_WINDOW_SECONDS = 5.0;
+    private const int CRC_LOG_MAX_PER_WINDOW = 5;
 
     // monotonic message id generator used for shards/full envelopes
     private uint _nextOutgoingMessageId = 1;
 
     // ---------- shard reassembly per-messageId (client) ----------
     private readonly ShardBufferRegistry _shardRegistry = new();
-    private readonly List<uint> _shardTimeoutScratch = new(8);
-    private const double SHARD_BUFFER_TIMEOUT_SECONDS = 2.0; // timeout fallback: request full if incomplete
+    private readonly List<uint> _shardTimeoutScratch = new();
+    private const double SHARD_BUFFER_TIMEOUT_SECONDS = 2.0;
 
+    // ---------- FEC suppression state ----------
     private readonly Dictionary<NetworkConnection, double> _fecSuppressedUntil = new();
     private const double FEC_DISABLE_DURATION_SECONDS = 10.0;
 
     // Diagnostics: map incoming envelope messageId -> server-provided payloadHash / payloadLen
-    private readonly Dictionary<uint, (ulong hash, int len)> _incomingEnvelopeMeta = new Dictionary<uint, (ulong, int)>();
+    private readonly Dictionary<uint, (ulong hash, int len)> _incomingEnvelopeMeta = new();
 
     // Track messageIds flagged as CANARY so we don't try to decode them as movement
-    private readonly HashSet<uint> _canaryMessageIds = new HashSet<uint>();
-
-    // Main loop and client rendering handled in PlayerNetworkDriverFishNet.ClientLoop.cs
+    private readonly HashSet<uint> _canaryMessageIds = new();
 
     // ------- CRC reporting helper (rate-limited, non-blocking) -------
     private void ReportCrcFailureOncePerWindow(string msg)
     {
-        // [BOOKMARK B - CRC WARNINGS GATE]
 #if !UNITY_EDITOR && !DEVELOPMENT_BUILD
         if (!enableCrcWarnings) return;
 #else
@@ -241,40 +242,40 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 #endif
 
         double now = Time.realtimeSinceStartup;
-        if (_crcFirstFailTime < 0.0) _crcFirstFailTime = now;
+        if (_crcFirstFailTime < 0.0)
+            _crcFirstFailTime = now;
 
         _crcFailCount++;
 
-        // if we are outside the accumulation window, emit summary and reset
+        // fuori finestra → log riepilogo + reset
         if (now - _crcFirstFailTime >= CRC_LOG_WINDOW_SECONDS)
         {
             int toLog = Math.Min(_crcFailCount, CRC_LOG_MAX_PER_WINDOW);
-            Debug.LogWarning($"{msg} — occurrences in last {CRC_LOG_WINDOW_SECONDS:0.#}s: {_crcFailCount}. Emitting {toLog} sample(s).");
-            // emit up to toLog sample warnings (non-blocking)
+            Debug.LogWarning(
+                $"{msg} — occurrences in last {CRC_LOG_WINDOW_SECONDS:0.#}s: {_crcFailCount}. Emitting {toLog} sample(s).");
+
             for (int i = 0; i < toLog; ++i)
                 Debug.LogWarning($"{msg} [sample {i + 1}/{toLog}]");
 
-            // telemetry metric
             _telemetry?.Observe("client.crc_fail_count", _crcFailCount);
 
-            // reset window
             _crcFailCount = 0;
             _crcFirstFailTime = -1.0;
             _crcLastLogTime = now;
             return;
         }
 
-        // If not yet window end, but we've exceeded a local burst threshold, produce one immediate log and continue counting
-        if (_crcFailCount == CRC_LOG_MAX_PER_WINDOW && (now - _crcLastLogTime) > 0.5)
+        // burst locale → un log immediato
+        if (_crcFailCount == CRC_LOG_MAX_PER_WINDOW &&
+            (now - _crcLastLogTime) > 0.5)
         {
             Debug.LogWarning($"{msg} — repeated (count={_crcFailCount})");
             _telemetry?.Observe("client.crc_fail_burst", _crcFailCount);
             _crcLastLogTime = now;
         }
-
-        // otherwise do not log anything now (silent accumulation)
     }
 
+    // ------- ShardBufferRegistry -------
     private sealed class ShardBufferRegistry
     {
         private readonly Dictionary<uint, List<ShardInfo>> _buffers = new();
@@ -302,7 +303,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
                     for (int i = list.Count; i < total; i++)
                         list.Add(null);
                 }
-                else if (list.Count > total)
+                else
                 {
                     list.RemoveRange(total, list.Count - total);
                 }
@@ -316,7 +317,8 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
             return list;
         }
 
-        public int GetTotalCount(uint messageId) => _totalCounts.TryGetValue(messageId, out var total) ? total : 0;
+        public int GetTotalCount(uint messageId) =>
+            _totalCounts.TryGetValue(messageId, out var total) ? total : 0;
 
         public void Forget(uint messageId)
         {
@@ -355,36 +357,48 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     // debug helper: preview primi N byte in hex
     static string BytesPreview(byte[] b, int n)
     {
-        if (b == null || b.Length == 0) return "(null)";
+        if (b == null || b.Length == 0)
+            return "(null)";
+
         int m = Math.Min(n, b.Length);
-        var sb = new System.Text.StringBuilder();
-        for (int i = 0; i < m; ++i) sb.AppendFormat("{0:X2}", b[i]);
-        if (b.Length > m) sb.Append("..");
+        var sb = new StringBuilder();
+        for (int i = 0; i < m; ++i)
+            sb.AppendFormat("{0:X2}", b[i]);
+
+        if (b.Length > m)
+            sb.Append("..");
+
         return sb.ToString();
     }
 
     // Helper: create an envelope byte[] with proper header fields filled (for single full/delta payloads)
     byte[] CreateEnvelopeBytes(byte[] payload)
     {
-        var env = new Envelope();
-        env.messageId = _nextOutgoingMessageId++;
-        env.seq = _lastSeqSent;
-        env.payloadLen = payload != null ? payload.Length : 0;
-        env.payloadHash = EnvelopeUtil.ComputeHash64(payload);
-        env.flags = 0;
+        var env = new Envelope
+        {
+            messageId = _nextOutgoingMessageId++,
+            seq = _lastSeqSent,
+            payloadLen = payload?.Length ?? 0,
+            payloadHash = EnvelopeUtil.ComputeHash64(payload),
+            flags = 0
+        };
+
         return EnvelopeUtil.Pack(env, payload);
     }
 
     // Helper: create an envelope for a shard but attach message-level metadata (full payload len/hash) for reassembly verification
     byte[] CreateEnvelopeBytesForShard(byte[] shard, uint messageId, int fullPayloadLen, ulong fullPayloadHash)
     {
-        var env = new Envelope();
-        env.messageId = messageId;
-        env.seq = _lastSeqSent;
-        // IMPORTANT: payloadLen/payloadHash here refer to the full payload (not the single shard)
-        env.payloadLen = fullPayloadLen;
-        env.payloadHash = fullPayloadHash;
-        env.flags = 0; // not canary, regular gameplay shard wrapper
+        var env = new Envelope
+        {
+            messageId = messageId,
+            seq = _lastSeqSent,
+            // payloadLen/payloadHash si riferiscono al payload COMPLETO, non al singolo shard
+            payloadLen = fullPayloadLen,
+            payloadHash = fullPayloadHash,
+            flags = 0
+        };
+
         return EnvelopeUtil.Pack(env, shard);
     }
 }
