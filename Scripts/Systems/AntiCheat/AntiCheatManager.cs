@@ -2,11 +2,12 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Networking.Adapters;
 
 // [BOOKMARK: SUMMARY]
 /// <summary>
 /// Validatore server-side degli input movimento del client.
-/// Ritorna true se l'input sembra legittimo, false se Ë sospetto.
+/// Ritorna true se l'input sembra legittimo, false se √® sospetto.
 /// Viene chiamato da PlayerNetworkDriverFishNet.CmdSendInput().
 /// </summary>
 public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
@@ -22,7 +23,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     [Tooltip("Blocca spike verticali esagerati (salti/voli istantanei).")]
     public bool enableVerticalClamp = true;
 
-    [Tooltip("Controllo extra di velocit‡ massima simulata lato server (un po' pi˘ costoso).")]
+    [Tooltip("Controllo extra di velocit√† massima simulata lato server (un po' pi√π costoso).")]
     public bool enableCheapSim = false;
 
     [Tooltip("Logga warning quando falliscono i check.")]
@@ -33,7 +34,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     [Tooltip("raggio di sample NavMesh.SamplePosition, metri.")]
     public float navMeshSampleDist = 1.0f;
 
-    [Tooltip("velocit‡ verticale massima consentita (m/s).")]
+    [Tooltip("velocit√† verticale massima consentita (m/s).")]
     public float maxVerticalSpeed = 2.0f;
 
     [Tooltip("quanti soft-fail prima di avvisare in log.")]
@@ -79,7 +80,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     }
 
     // =====================================================================
-    // 2) Overload usato dal driver quando puÚ passare dtServer
+    // 2) Overload usato dal driver quando pu√≤ passare dtServer
     //    (NOTA: usa IPlayerNetworkDriver, non il tipo concreto!)
     // =====================================================================
     // [BOOKMARK: API_WITH_DT]
@@ -124,7 +125,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     {
         bool ok = true;
 
-        // ricava PlayerControllerCore per velocit‡ consentita (se presente sullo stesso GO)
+        // ricava PlayerControllerCore per velocit√† consentita (se presente sullo stesso GO)
         PlayerControllerCore core = null;
         if (drv is MonoBehaviour mb)
             core = mb.GetComponent<PlayerControllerCore>();
@@ -148,7 +149,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
             }
         }
 
-        // 2) validit‡ NavMesh
+        // 2) validit√† NavMesh
         if (ok && enableNavMeshCheck)
         {
             if (!NavMesh.SamplePosition(predictedPos, out NavMeshHit nh, navMeshSampleDist, NavMesh.AllAreas))
@@ -177,15 +178,15 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
             }
         }
 
-        // 4) cheap sim (opzionale) ó verifica che la velocit‡ planare non superi un tetto ragionevole
+        // 4) cheap sim (opzionale) ¬ó verifica che la velocit√† planare non superi un tetto ragionevole
         if (ok && enableCheapSim)
         {
             Vector3 delta = predictedPos - lastServerPos;
             delta.y = 0f;
             float speed = delta.magnitude / Mathf.Max(0.001f, dtServer);
 
-            // fattore di margine (deriva dal tuo driver): maxSpeedTolerance gi‡ considerato nel maxStepAllowance,
-            // qui usiamo un tetto extra per spike ancora pi˘ ìeclatantiî
+            // fattore di margine (deriva dal tuo driver): maxSpeedTolerance gi√† considerato nel maxStepAllowance,
+            // qui usiamo un tetto extra per spike ancora pi√π ¬ìeclatanti¬î
             float hardCap = allowedSpeed * 1.8f;
             if (speed > hardCap)
             {

@@ -2,9 +2,7 @@
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.EventSystems;
-using FishNet.Object;
-using FishNet;
-using FishNet.Connection;
+using Game.Networking.Adapters;
 
 [RequireComponent(typeof(NavMeshAgent))]
 [RequireComponent(typeof(PlayerControllerCore))]
@@ -34,7 +32,7 @@ public class ClickToMoveAgent : MonoBehaviour
 
     private NavMeshAgent _agent;
     private PlayerControllerCore _ctrl;
-    private NetworkObject _nobj;
+    private IPlayerNetworkDriver _driver;
 
     private float _nextClick;
     private bool _hasLastGoal;
@@ -52,7 +50,7 @@ public class ClickToMoveAgent : MonoBehaviour
         if (!cam) cam = Camera.main;
         _agent = GetComponent<NavMeshAgent>();
         _ctrl = GetComponent<PlayerControllerCore>();
-        _nobj = GetComponent<NetworkObject>();
+        CacheNetworkDriver();
 
         // Important: NavMeshAgent is ONLY used for pathfinding/steering,
         // movement is actually applied via Rigidbody in PlayerControllerCore.
@@ -65,6 +63,12 @@ public class ClickToMoveAgent : MonoBehaviour
         _agent.stoppingDistance = Mathf.Max(0.15f, _agent.stoppingDistance);
     }
 
+    void OnEnable()
+    {
+        if (_driver == null)
+            CacheNetworkDriver();
+    }
+
     void LateUpdate()
     {
         if (!cam) cam = Camera.main;
@@ -72,19 +76,25 @@ public class ClickToMoveAgent : MonoBehaviour
             _uiLayer = LayerMask.NameToLayer(uiLayerName);
     }
 
+    void CacheNetworkDriver()
+    {
+        _driver = null;
+        var behaviours = GetComponents<MonoBehaviour>();
+        for (int i = 0; i < behaviours.Length; i++)
+        {
+            if (behaviours[i] is IPlayerNetworkDriver drv)
+            {
+                _driver = drv;
+                break;
+            }
+        }
+    }
+
     bool HasLocalAuthorityForInput()
     {
-        // Owner può sempre comandare.
-        // Sul server possiamo opzionalmente permettere input (per debugging host).
-        if (_nobj == null)
-            return true;
-        if (!_nobj.IsSpawned)
-            return true;
-        if (_nobj.IsOwner)
-            return true;
-        if (allowServerOnlyInput && _nobj.IsServerInitialized)
-            return true;
-        return false;
+        if (_driver != null)
+            return _driver.HasInputAuthority(allowServerOnlyInput);
+        return true;
     }
 
     void Update()

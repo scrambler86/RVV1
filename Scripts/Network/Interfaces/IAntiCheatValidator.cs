@@ -1,4 +1,5 @@
 using UnityEngine;
+using Game.Networking.Adapters;
 
 public interface IAntiCheatValidator
 {

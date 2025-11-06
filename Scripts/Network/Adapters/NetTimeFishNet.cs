@@ -1,13 +1,18 @@
-﻿using UnityEngine;
 using FishNet;
 using FishNet.Managing.Timing;
+using UnityEngine;
 
-public class NetTimeFishNet : INetTime
+namespace Game.Networking.Adapters
 {
-    public double Now()
+    public class NetTimeFishNet : INetTime
     {
-        var tm = InstanceFinder.TimeManager;
-        if (tm == null) return Time.timeAsDouble;
-        return tm.TicksToTime(tm.GetPreciseTick(TickType.Tick));
+        public double Now()
+        {
+            TimeManager tm = InstanceFinder.TimeManager;
+            if (tm == null)
+                return Time.timeAsDouble;
+
+            return tm.TicksToTime(tm.GetPreciseTick(TickType.Tick));
+        }
     }
 }

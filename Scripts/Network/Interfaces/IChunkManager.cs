@@ -1,4 +1,6 @@
 using UnityEngine;
+using Game.Networking.Adapters;
+
 public interface IChunkManager
 {
     void RegisterPlayer(IPlayerNetworkDriver drv);
