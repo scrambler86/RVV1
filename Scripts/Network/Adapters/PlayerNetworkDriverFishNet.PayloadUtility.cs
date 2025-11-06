@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
+using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 
@@ -143,7 +144,7 @@ public partial class PlayerNetworkDriverFishNet
                 if (computed != meta.hash || payloadLength != meta.len)
                 {
                     Debug.LogWarning($"[Driver.Warning] Hash/len mismatch for messageId={messageId} computedHash=0x{computed:X16} serverHash=0x{meta.hash:X16} computedLen={payloadLength} serverLen={meta.len}");
-                    RequestFullSnapshotFromServer(true);
+                    RequestFullSnapshotFromServer(preferNoFec: true);
                 }
                 else if (verboseNetLog)
                 {
@@ -179,7 +180,7 @@ public partial class PlayerNetworkDriverFishNet
         foreach (var id in _shardTimeoutScratch)
         {
             _telemetry?.Increment("pack.shards_timeout");
-            RequestFullSnapshotFromServer(true);
+            RequestFullSnapshotFromServer(preferNoFec: true);
             CleanupShardBuffer(id);
             _incomingEnvelopeMeta.Remove(id);
             _canaryMessageIds.Remove(id);
@@ -258,14 +259,24 @@ public partial class PlayerNetworkDriverFishNet
     }
 
     [ServerRpc(RequireOwnership = false)]
-    void RequestFullSnapshotServerRpc(bool preferNoFec)
+    void RequestFullSnapshotServerRpc()
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        SendFullSnapshotTo(base.Owner);
+    }
+
+    [ServerRpc(RequireOwnership = false)]
+    void RequestFullSnapshotNoFecServerRpc()
+    {
         var conn = base.Owner;
         if (conn == null) return;
+        SuppressFecTemporarily(conn);
+        SendFullSnapshotTo(conn);
+    }
 
-        if (preferNoFec)
-            SuppressFecTemporarily(conn);
+    void SendFullSnapshotTo(NetworkConnection conn)
+    {
+        if (_shuttingDown || s_AppQuitting) return;
+        if (conn == null) return;
 
         Vector3 pos = _serverLastPos;
         Vector3 vel = Vector3.zero;
@@ -330,7 +341,10 @@ public partial class PlayerNetworkDriverFishNet
             preferNoFec = true;
         }
 
-        RequestFullSnapshotServerRpc(preferNoFec);
+        if (preferNoFec)
+            RequestFullSnapshotNoFecServerRpc();
+        else
+            RequestFullSnapshotServerRpc();
     }
 
     void NoteSuccessfulSnapshotDelivery()
