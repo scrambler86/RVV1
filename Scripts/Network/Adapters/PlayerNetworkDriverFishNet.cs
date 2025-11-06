@@ -111,6 +111,20 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     public void SetLastSeqReceived(uint seq) => _lastSeqReceived = seq;
     public double ClientRttMs => _lastRttMs;
 
+    public bool HasInputAuthority(bool allowServerFallback)
+    {
+        var nob = NetworkObject;
+        if (nob == null)
+            return true;
+        if (!nob.IsSpawned)
+            return true;
+        if (IsOwner)
+            return true;
+        if (allowServerFallback && nob.IsServerInitialized)
+            return true;
+        return false;
+    }
+
     // ==== privati ====
     private INetTime _netTime;
     private IAntiCheatValidator _anti;
@@ -165,7 +179,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 
     // ---------- Reconcile cooldown ----------
     private double _lastReconcileSentTime = -9999.0;
-    private const double RECONCILE_COOLDOWN_SEC = 0.20; // tune as needed
+    private const double RECONCILE_COOLDOWN_SEC = 0.20; // default, tune as needed
 
     // ---------- Reliable full-keyframe + FEC storage ----------
     private readonly Dictionary<NetworkConnection, byte[]> _lastFullPayload = new();
@@ -205,7 +219,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 
     // ---------- shard reassembly per-messageId (client) ----------
     private readonly ShardBufferRegistry _shardRegistry = new();
-    private readonly List<uint> _shardTimeoutScratch = new(8);
+    private readonly List<uint> _shardTimeoutScratch = new();
     private const double SHARD_BUFFER_TIMEOUT_SECONDS = 2.0;
 
     // ---------- FEC suppression state ----------
@@ -215,15 +229,12 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
     // Diagnostics: map incoming envelope messageId -> server-provided payloadHash / payloadLen
     private readonly Dictionary<uint, (ulong hash, int len)> _incomingEnvelopeMeta = new();
 
-    // Track messageIds flagged as CANARY so we don't try to decode them come movement
+    // Track messageIds flagged as CANARY so we don't try to decode them as movement
     private readonly HashSet<uint> _canaryMessageIds = new();
-
-    // Main loop and client rendering handled in PlayerNetworkDriverFishNet.ClientLoop.cs
 
     // ------- CRC reporting helper (rate-limited, non-blocking) -------
     private void ReportCrcFailureOncePerWindow(string msg)
     {
-        // [BOOKMARK B - CRC WARNINGS GATE]
 #if !UNITY_EDITOR && !DEVELOPMENT_BUILD
         if (!enableCrcWarnings) return;
 #else
@@ -231,11 +242,12 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 #endif
 
         double now = Time.realtimeSinceStartup;
-        if (_crcFirstFailTime < 0.0) _crcFirstFailTime = now;
+        if (_crcFirstFailTime < 0.0)
+            _crcFirstFailTime = now;
 
         _crcFailCount++;
 
-        // se fuori finestra → log di riepilogo e reset
+        // fuori finestra → log riepilogo + reset
         if (now - _crcFirstFailTime >= CRC_LOG_WINDOW_SECONDS)
         {
             int toLog = Math.Min(_crcFailCount, CRC_LOG_MAX_PER_WINDOW);
@@ -253,7 +265,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
             return;
         }
 
-        // burst locale → un log immediato, poi silenzio
+        // burst locale → un log immediato
         if (_crcFailCount == CRC_LOG_MAX_PER_WINDOW &&
             (now - _crcLastLogTime) > 0.5)
         {
@@ -291,7 +303,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
                     for (int i = list.Count; i < total; i++)
                         list.Add(null);
                 }
-                else if (list.Count > total)
+                else
                 {
                     list.RemoveRange(total, list.Count - total);
                 }
@@ -342,7 +354,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         TargetPackedShardTo(conn, packedShard);
     }
 
-    // debug helper: anteprima primi N byte in hex
+    // debug helper: preview primi N byte in hex
     static string BytesPreview(byte[] b, int n)
     {
         if (b == null || b.Length == 0)
@@ -350,7 +362,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 
         int m = Math.Min(n, b.Length);
         var sb = new StringBuilder();
-
         for (int i = 0; i < m; ++i)
             sb.AppendFormat("{0:X2}", b[i]);
 
@@ -360,7 +371,7 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         return sb.ToString();
     }
 
-    // Helper: envelope per payload full/delta
+    // Helper: create an envelope byte[] with proper header fields filled (for single full/delta payloads)
     byte[] CreateEnvelopeBytes(byte[] payload)
     {
         var env = new Envelope
@@ -375,15 +386,16 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         return EnvelopeUtil.Pack(env, payload);
     }
 
-    // Helper: envelope per shard con metadata del payload completo
+    // Helper: create an envelope for a shard but attach message-level metadata (full payload len/hash) for reassembly verification
     byte[] CreateEnvelopeBytesForShard(byte[] shard, uint messageId, int fullPayloadLen, ulong fullPayloadHash)
     {
         var env = new Envelope
         {
             messageId = messageId,
             seq = _lastSeqSent,
-            payloadLen = fullPayloadLen,      // len del payload completo
-            payloadHash = fullPayloadHash,    // hash del payload completo
+            // payloadLen/payloadHash si riferiscono al payload COMPLETO, non al singolo shard
+            payloadLen = fullPayloadLen,
+            payloadHash = fullPayloadHash,
             flags = 0
         };
 

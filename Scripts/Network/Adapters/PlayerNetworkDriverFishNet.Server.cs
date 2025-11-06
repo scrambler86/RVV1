@@ -31,17 +31,15 @@ public partial class PlayerNetworkDriverFishNet
         return false;
     }
 
-    // BOOKMARK: SERVER_INTEGRATE_MOVEMENT
     /// <summary>
     /// Server-side integrazione movimento (authoritative).
-    /// Usa solo la dir e lo speed, non la posizione grezza del client.
+    /// Usa solo dir e speed; non si fida della posizione grezza del client.
     /// </summary>
     Vector3 IntegrateServerMovement(Vector3 startPos, Vector3 dir, bool running, float dt)
     {
         if (dt <= 0f)
             return startPos;
 
-        // Movimento planare
         Vector3 planar = new Vector3(dir.x, 0f, dir.z);
         float mag = planar.magnitude;
         if (mag > 1f)
@@ -53,44 +51,14 @@ public partial class PlayerNetworkDriverFishNet
         Vector3 result = startPos + step;
 
         if (ignoreNetworkY)
-        {
             result.y = startPos.y;
-        }
         else
-        {
             result.y = startPos.y + dir.y * speed * dt;
-        }
 
         return result;
     }
 
-    // BOOKMARK: FEC_SUPPRESSION
-    bool IsFecSuppressed(NetworkConnection conn)
-    {
-        if (conn == null)
-            return false;
-
-        if (_fecSuppressedUntil.TryGetValue(conn, out double until))
-        {
-            double now = _netTime.Now();
-            if (now < until)
-                return true;
-
-            _fecSuppressedUntil.Remove(conn);
-        }
-
-        return false;
-    }
-
-    void SuppressFecTemporarily(NetworkConnection conn)
-    {
-        if (conn == null)
-            return;
-
-        _fecSuppressedUntil[conn] = _netTime.Now() + FEC_DISABLE_DURATION_SECONDS;
-    }
-
-    // BOOKMARK: CMD_SEND_INPUT
+    // ---------- Input dal client → server authoritative ----------
     [ServerRpc(RequireOwnership = false)]
     void CmdSendInput(Vector3 dir,
                       Vector3 clientPredictedPos,
@@ -107,7 +75,7 @@ public partial class PlayerNetworkDriverFishNet
         if (!RateLimitOk(now))
             return;
 
-        // dt robusto
+        // dt robusto (server clock vs timestamp client)
         double dtServerRaw = now - _serverLastTime;
         double dtClientEstimate = Math.Max(0.0, now - timestamp);
         double dt = Math.Max(0.001, Math.Max(dtServerRaw, dtClientEstimate));
@@ -115,16 +83,17 @@ public partial class PlayerNetworkDriverFishNet
 
         _serverLastTime = now;
 
-        // Il client manda la sua predicted; la usiamo solo per analisi/soft clamp.
+        // Predicted pos del client: usata solo per anti-cheat / soft clamp
         Vector3 predictedPos = clientPredictedPos;
 
-        // Server integra in modo authoritativo dal suo ultimo stato
+        // Integrazione authoritative lato server
         Vector3 serverIntegratedPos = IntegrateServerMovement(_serverLastPos, dir, running, dtF);
-        _telemetry?.Observe($"client.{OwnerClientId}.predicted_vs_integrated_cm",
+        _telemetry?.Observe(
+            $"client.{OwnerClientId}.predicted_vs_integrated_cm",
             Vector3.Distance(serverIntegratedPos, clientPredictedPos) * 100.0);
 
-        // RTT e slack per tolleranza
-        double oneWay = Math.Max(0.0, now - timestamp); // ~half RTT
+        // Stima RTT e slack di tolleranza
+        double oneWay = Math.Max(0.0, now - timestamp); // circa metà RTT
         _lastRttMs = oneWay * 2000.0;
 
         float stepSlack = Mathf.Clamp(
@@ -138,7 +107,7 @@ public partial class PlayerNetworkDriverFishNet
         _telemetry?.Increment($"client.{OwnerClientId}.inputs_received");
         _telemetry?.Observe($"client.{OwnerClientId}.maxStep_cm", maxStep * 100.0);
 
-        // BOOKMARK: ANTI_CHEAT_VALIDATE
+        // ---------- Anti-cheat ----------
         bool ok = true;
         if (_anti != null)
         {
@@ -148,7 +117,6 @@ public partial class PlayerNetworkDriverFishNet
                 ok = _anti.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running);
         }
 
-        // Se non ok → soft clamp verso posizione valida
         if (!ok)
         {
             Vector3 delta = predictedPos - _serverLastPos;
@@ -184,17 +152,18 @@ public partial class PlayerNetworkDriverFishNet
             if (planarDist > 1e-6f)
             {
                 float allowed = Mathf.Max(0f, maxStep);
+
                 if (planarDist > allowed)
                 {
-                    // Clamp verso un massimo consentito
-                    predictedPos = _serverLastPos
-                                   + planar.normalized * allowed
-                                   + new Vector3(
-                                       0f,
-                                       Mathf.Clamp(delta.y,
-                                           -maxVerticalSpeed * dtF,
-                                           maxVerticalSpeed * dtF),
-                                       0f);
+                    predictedPos =
+                        _serverLastPos +
+                        planar.normalized * allowed +
+                        new Vector3(
+                            0f,
+                            Mathf.Clamp(delta.y,
+                                -maxVerticalSpeed * dtF,
+                                maxVerticalSpeed * dtF),
+                            0f);
                 }
                 else
                 {
@@ -208,17 +177,16 @@ public partial class PlayerNetworkDriverFishNet
 
             if (_anti is AntiCheatManager ac && ac.debugLogs && verboseNetLog)
             {
-                Debug.LogWarning($"[AC] Soft-clamp seq={seq} clientDelta={planarDist:0.###} " +
-                                 $"maxStep={maxStep:0.###} rttMs={_lastRttMs:0.0}");
+                Debug.LogWarning(
+                    $"[AC] Soft-clamp seq={seq} clientDelta={planarDist:0.###} " +
+                    $"maxStep={maxStep:0.###} rttMs={_lastRttMs:0.0}");
             }
 
             _telemetry?.Increment($"client.{OwnerClientId}.anti_cheat.soft_clamps");
             _telemetry?.Increment("anti_cheat.soft_clamps");
         }
 
-        // BOOKMARK: NAVMESH_AND_VELOCITY
-        // Scegliamo la posizione finale: se input valido → integrazione server;
-        // se soft-clamp → predicted corretta.
+        // ---------- NavMesh + velocità ----------
         Vector3 finalPos = ok ? serverIntegratedPos : predictedPos;
 
         if (validateNavMesh &&
@@ -230,28 +198,29 @@ public partial class PlayerNetworkDriverFishNet
         Vector3 deltaPos = finalPos - _serverLastPos;
         Vector3 vel = deltaPos / dtF;
 
-        // Limite verticale
+        // Clamp verticale
         if (Mathf.Abs(vel.y) > maxVerticalSpeed)
         {
             finalPos.y = _serverLastPos.y;
             deltaPos = finalPos - _serverLastPos;
             vel = deltaPos / dtF;
         }
-
         vel.y = 0f;
 
-        // Aggiorna stato server
+        // Aggiorna stato server authoritative
         Vector3 oldServerLast = _serverLastPos;
         _serverLastPos = finalPos;
 
-        // BOOKMARK: SNAPSHOT_BUILD
-        byte anim = (byte)((vel.magnitude > 0.12f) ? (running ? 2 : 1) : 0);
+        byte anim = (byte)((vel.magnitude > 0.12f)
+            ? (running ? 2 : 1)
+            : 0);
+
         var snap = new MovementSnapshot(finalPos, vel, now, seq, anim);
 
-        // Lag compensation buffer per hit-scan server-side
+        // Lag compensation buffer
         GetComponent<LagCompBuffer>()?.Push(finalPos, vel, now);
 
-        // ---- Keyframe / full snapshot decision ----
+        // ---------- Decide se forzare un FULL keyframe ----------
         bool requireFull = false;
         float planarErr = Vector3.Distance(finalPos, oldServerLast);
 
@@ -259,7 +228,6 @@ public partial class PlayerNetworkDriverFishNet
         if (sinceKFcount >= Math.Max(1, keyframeEvery / 2))
             requireFull = true;
 
-        // Se ci siamo appena riconciliati forte, meglio forzare full
         if (planarErr > hardSnapDist * 0.9f &&
             (now - _lastReconcileSentTime) < RECONCILE_COOLDOWN_SEC * 1.5)
         {
@@ -271,7 +239,6 @@ public partial class PlayerNetworkDriverFishNet
 
         if (requireFull)
         {
-            // Keyframe FULL al proprietario + observers
             short cellX = 0, cellY = 0;
             if (_chunk.TryGetCellOf(Owner, out var ccell))
             {
@@ -289,7 +256,7 @@ public partial class PlayerNetworkDriverFishNet
             _lastFullSentAt[Owner] = _netTime.Now();
             _fullRetryCount[Owner] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(Owner))
+            if (fecParityShards > 0 && !debugForceFullSnapshots && IsFecSuppressed(Owner) == false)
             {
                 var shards = BuildFecShards(full, fecShardSize, fecParityShards);
                 _lastFullShards[Owner] = shards;
@@ -308,14 +275,15 @@ public partial class PlayerNetworkDriverFishNet
                 for (int i = 0; i < shards.Count; i++)
                 {
                     var s = shards[i];
+
                     if (verboseNetLog)
                     {
                         Debug.Log(
                             $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
                     }
 
-                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(
-                        s, messageId, fullLen, fullHash);
+                    byte[] envelopeBytes =
+                        CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
 
                     TargetPackedShardTo(Owner, envelopeBytes);
                 }
@@ -330,7 +298,7 @@ public partial class PlayerNetworkDriverFishNet
         }
         else
         {
-            // Niente full: mandiamo solo eventuale correzione dolce all'owner
+            // Correzione al proprietario basata sulla posizione authoritative finale
             SendTargetOwnerCorrection(seq, finalPos);
         }
 
@@ -426,7 +394,8 @@ public partial class PlayerNetworkDriverFishNet
     public double GetLastMeasuredRttMs()
         => _lastRttMs;
 
-    // BOOKMARK: SERVER_BROADCAST
+    // ---------- Broadcast snapshot osservatori ----------
+
     void Server_BroadcastPacked(MovementSnapshot snap)
     {
         if (_shuttingDown || s_AppQuitting)
@@ -519,6 +488,7 @@ public partial class PlayerNetworkDriverFishNet
         if (!sendFull && _lastSentSnap.TryGetValue(conn, out var last))
         {
             var lastSnapLocal = last;
+
             payload = PackedMovement.PackDelta(
                 in lastSnapLocal,
                 snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
@@ -546,7 +516,7 @@ public partial class PlayerNetworkDriverFishNet
             _lastFullSentAt[conn] = now;
             _fullRetryCount[conn] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(conn))
+            if (fecParityShards > 0 && !debugForceFullSnapshots && IsFecSuppressed(conn) == false)
             {
                 var shards = BuildFecShards(payload, fecShardSize, fecParityShards);
                 _lastFullShards[conn] = shards;
@@ -565,6 +535,7 @@ public partial class PlayerNetworkDriverFishNet
                 for (int i = 0; i < shards.Count; i++)
                 {
                     var s = shards[i];
+
                     if (verboseNetLog)
                     {
                         Debug.Log(
@@ -761,7 +732,7 @@ public partial class PlayerNetworkDriverFishNet
         _telemetry?.Increment($"client.{OwnerClientId}.full_ack");
     }
 
-    // BOOKMARK: OWNER_CORRECTION
+    // ---------- Correction owner ----------
     void SendTargetOwnerCorrection(uint serverSeq, Vector3 serverPos)
     {
         try
@@ -770,7 +741,7 @@ public partial class PlayerNetworkDriverFishNet
         }
         catch
         {
-            // Owner potrebbe non essere valido in alcune fasi di shutdown.
+            // Owner può non essere valido durante shutdown / despawn
         }
     }
 }

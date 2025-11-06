@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
+using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 
@@ -34,8 +35,9 @@ public partial class PlayerNetworkDriverFishNet
 
             if (verboseNetLog)
             {
-                Debug.Log($"[Driver.Debug] HandlePackedShard envelope id={env.messageId} payloadLen={env.payloadLen} " +
-                          $"flags=0x{env.flags:X2} innerFirst8={BytesPreview(inner, 8)}");
+                Debug.Log(
+                    $"[Driver.Debug] HandlePackedShard envelope id={env.messageId} payloadLen={env.payloadLen} " +
+                    $"flags=0x{env.flags:X2} innerFirst8={BytesPreview(inner, 8)}");
             }
 
             try
@@ -46,7 +48,8 @@ public partial class PlayerNetworkDriverFishNet
         }
         else if (verboseNetLog)
         {
-            Debug.Log($"[Driver.Debug] HandlePackedShard raw first8={BytesPreview(shard, 8)}");
+            Debug.Log(
+                $"[Driver.Debug] HandlePackedShard raw first8={BytesPreview(shard, 8)}");
         }
 
         if (innerShard == null || innerShard.Length < 8)
@@ -69,7 +72,13 @@ public partial class PlayerNetworkDriverFishNet
         var list = _shardRegistry.GetOrCreate(messageId, total, Time.realtimeSinceStartup);
 
         if (idx < list.Count)
-            list[idx] = new ShardInfo { total = total, index = idx, dataLen = dataLen, data = data };
+            list[idx] = new ShardInfo
+            {
+                total = total,
+                index = idx,
+                dataLen = dataLen,
+                data = data
+            };
 
         _telemetry?.Increment("pack.shards_received");
 
@@ -270,7 +279,8 @@ public partial class PlayerNetworkDriverFishNet
                 ref _haveAnchor, ref _anchorCellX, ref _anchorCellY,
                 ref _baseSnap, out snap))
         {
-            ReportCrcFailureOncePerWindow("[PackedMovement] CRC mismatch or unpack failure detected");
+            ReportCrcFailureOncePerWindow(
+                "[PackedMovement] CRC mismatch or unpack failure detected");
             _telemetry?.Increment("pack.unpack_fail");
             RequestFullSnapshotFromServer(true);
             return;
@@ -389,9 +399,12 @@ public partial class PlayerNetworkDriverFishNet
             foreach (var s in shards)
             {
                 if (verboseNetLog)
-                    Debug.Log($"[Server.Debug] Shard idx? shardLen={s.Length} first8={BytesPreview(s, 8)}");
+                    Debug.Log(
+                        $"[Server.Debug] Shard idx? shardLen={s.Length} first8={BytesPreview(s, 8)}");
 
-                byte[] envelopeBytes = CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
+                byte[] envelopeBytes =
+                    CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
+
                 TargetPackedShardTo(conn, envelopeBytes);
             }
         }
@@ -488,6 +501,7 @@ public partial class PlayerNetworkDriverFishNet
             return shards;
 
         int effectiveShardSize = Math.Min(shardSize, Math.Max(1, payload.Length));
+
         int dataShards = (payload.Length + effectiveShardSize - 1) / effectiveShardSize;
         int totalShards = dataShards + parityCount;
 

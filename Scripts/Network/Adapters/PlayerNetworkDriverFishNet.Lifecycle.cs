@@ -1,5 +1,6 @@
 using System;
 using FishNet;
+using FishNet.Connection;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -33,11 +34,15 @@ public partial class PlayerNetworkDriverFishNet
 
         if (IsOwner)
         {
-            _rb.isKinematic = false; _rb.detectCollisions = true; _rb.interpolation = RigidbodyInterpolation.Interpolate;
+            _rb.isKinematic = false;
+            _rb.detectCollisions = true;
+            _rb.interpolation = RigidbodyInterpolation.Interpolate;
         }
         else
         {
-            _rb.isKinematic = true; _rb.detectCollisions = false; _rb.interpolation = RigidbodyInterpolation.None;
+            _rb.isKinematic = true;
+            _rb.detectCollisions = false;
+            _rb.interpolation = RigidbodyInterpolation.None;
             _remoteLastRenderPos = transform.position;
             _remoteDisplaySpeed = 0f;
         }
@@ -46,7 +51,8 @@ public partial class PlayerNetworkDriverFishNet
         double rtt = (tm != null) ? Math.Max(0.01, tm.RoundTripTime / 1000.0) : 0.06;
         _back = _backTarget = ClampD(rtt * 0.6, minBack, maxBack);
 
-        _haveAnchor = false; _baseSnap = default;
+        _haveAnchor = false;
+        _baseSnap = default;
         _tokens = maxInputsPerSecond + burstAllowance;
         _lastRefill = _netTime.Now();
         _shuttingDown = false;
@@ -57,12 +63,13 @@ public partial class PlayerNetworkDriverFishNet
     public override void OnStartServer()
     {
         base.OnStartServer();
+
         _shuttingDown = false;
         _chunk?.RegisterPlayer(this);
+
         _serverLastPos = transform.position;
         _tokens = maxInputsPerSecond + burstAllowance;
         _lastRefill = _netTime.Now();
-
         _serverLastTime = _netTime.Now();
     }
 
@@ -76,15 +83,30 @@ public partial class PlayerNetworkDriverFishNet
     public override void OnStopClient()
     {
         _shuttingDown = true;
+        _core.SetAllowInput(false);
         base.OnStopClient();
     }
 
     void OnDisable()
     {
         _shuttingDown = true;
+
         if (IsServerInitialized && _chunk != null)
         {
-            try { _chunk.UnregisterPlayer(this); } catch { }
+            try
+            {
+                _chunk.UnregisterPlayer(this);
+            }
+            catch
+            {
+                // swallow: during shutdown/unload it's safe ignorare
+            }
         }
+    }
+
+    public override void OnOwnershipClient(NetworkConnection previousOwner)
+    {
+        base.OnOwnershipClient(previousOwner);
+        _core.SetAllowInput(IsOwner);
     }
 }
