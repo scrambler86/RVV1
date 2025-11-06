@@ -10,67 +10,151 @@ using UnityEngine.AI;
 public partial class PlayerNetworkDriverFishNet
 {
     // ==================== SERVER ====================
+
     bool RateLimitOk(double now)
     {
         float cap = maxInputsPerSecond + burstAllowance;
         float refill = (float)((now - _lastRefill) * refillPerSecond);
+
         if (refill > 0f)
         {
             _tokens = Mathf.Min(cap, _tokens + refill);
             _lastRefill = now;
         }
+
         if (_tokens >= 1f)
         {
             _tokens -= 1f;
             return true;
         }
+
         return false;
     }
 
-    [ServerRpc(RequireOwnership = false)]
-    void CmdSendInput(Vector3 dir, Vector3 predictedPos, bool running, uint seq, bool isCTM, Vector3[] pathCorners, double timestamp)
+    // BOOKMARK: SERVER_INTEGRATE_MOVEMENT
+    /// <summary>
+    /// Server-side integrazione movimento (authoritative).
+    /// Usa solo la dir e lo speed, non la posizione grezza del client.
+    /// </summary>
+    Vector3 IntegrateServerMovement(Vector3 startPos, Vector3 dir, bool running, float dt)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (dt <= 0f)
+            return startPos;
+
+        // Movimento planare
+        Vector3 planar = new Vector3(dir.x, 0f, dir.z);
+        float mag = planar.magnitude;
+        if (mag > 1f)
+            planar /= mag;
+
+        float speed = running ? _core.speed * _core.runMultiplier : _core.speed;
+        Vector3 step = planar * speed * dt;
+
+        Vector3 result = startPos + step;
+
+        if (ignoreNetworkY)
+        {
+            result.y = startPos.y;
+        }
+        else
+        {
+            result.y = startPos.y + dir.y * speed * dt;
+        }
+
+        return result;
+    }
+
+    // BOOKMARK: FEC_SUPPRESSION
+    bool IsFecSuppressed(NetworkConnection conn)
+    {
+        if (conn == null)
+            return false;
+
+        if (_fecSuppressedUntil.TryGetValue(conn, out double until))
+        {
+            double now = _netTime.Now();
+            if (now < until)
+                return true;
+
+            _fecSuppressedUntil.Remove(conn);
+        }
+
+        return false;
+    }
+
+    void SuppressFecTemporarily(NetworkConnection conn)
+    {
+        if (conn == null)
+            return;
+
+        _fecSuppressedUntil[conn] = _netTime.Now() + FEC_DISABLE_DURATION_SECONDS;
+    }
+
+    // BOOKMARK: CMD_SEND_INPUT
+    [ServerRpc(RequireOwnership = false)]
+    void CmdSendInput(Vector3 dir,
+                      Vector3 clientPredictedPos,
+                      bool running,
+                      uint seq,
+                      bool isCTM,
+                      Vector3[] pathCorners,
+                      double timestamp)
+    {
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         double now = _netTime.Now();
-        if (!RateLimitOk(now)) return;
+        if (!RateLimitOk(now))
+            return;
 
-        // Compute dt robustly
+        // dt robusto
         double dtServerRaw = now - _serverLastTime;
         double dtClientEstimate = Math.Max(0.0, now - timestamp);
         double dt = Math.Max(0.001, Math.Max(dtServerRaw, dtClientEstimate));
+        float dtF = (float)dt;
 
         _serverLastTime = now;
 
-        // RTT estimate
-        double oneWay = Math.Max(0.0, now - timestamp);
+        // Il client manda la sua predicted; la usiamo solo per analisi/soft clamp.
+        Vector3 predictedPos = clientPredictedPos;
+
+        // Server integra in modo authoritativo dal suo ultimo stato
+        Vector3 serverIntegratedPos = IntegrateServerMovement(_serverLastPos, dir, running, dtF);
+        _telemetry?.Observe($"client.{OwnerClientId}.predicted_vs_integrated_cm",
+            Vector3.Distance(serverIntegratedPos, clientPredictedPos) * 100.0);
+
+        // RTT e slack per tolleranza
+        double oneWay = Math.Max(0.0, now - timestamp); // ~half RTT
         _lastRttMs = oneWay * 2000.0;
 
-        float stepSlack = Mathf.Clamp(1f + (float)(oneWay * 2.0) * slackK, slackMin, slackMax);
+        float stepSlack = Mathf.Clamp(
+            1f + (float)(oneWay * 2.0) * slackK,
+            slackMin,
+            slackMax);
 
         float speed = running ? _core.speed * _core.runMultiplier : _core.speed;
-        float maxStep = speed * (float)dt * maxSpeedTolerance * stepSlack;
+        float maxStep = speed * dtF * maxSpeedTolerance * stepSlack;
 
-        // Telemetry: inputs received
         _telemetry?.Increment($"client.{OwnerClientId}.inputs_received");
         _telemetry?.Observe($"client.{OwnerClientId}.maxStep_cm", maxStep * 100.0);
 
-        // Anti-cheat validation
+        // BOOKMARK: ANTI_CHEAT_VALIDATE
         bool ok = true;
-        float planarDist = 0f;
         if (_anti != null)
         {
             if (_anti is AntiCheatManager acm)
-                ok = acm.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running, (float)dt);
+                ok = acm.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running, dtF);
             else
                 ok = _anti.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running);
         }
 
+        // Se non ok → soft clamp verso posizione valida
         if (!ok)
         {
             Vector3 delta = predictedPos - _serverLastPos;
             Vector3 planar = new Vector3(delta.x, 0f, delta.z);
-            planarDist = planar.magnitude;
+            float planarDist = planar.magnitude;
+
             _telemetry?.Observe($"client.{OwnerClientId}.planarDist_cm", planarDist * 100.0);
 
             var tags = new Dictionary<string, string>
@@ -92,7 +176,8 @@ public partial class PlayerNetworkDriverFishNet
                 if (sampleCount++ >= 6) break;
                 inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
             }
-            if (inpList.Count > 0) tags["input_sample"] = string.Join("|", inpList);
+            if (inpList.Count > 0)
+                tags["input_sample"] = string.Join("|", inpList);
 
             _telemetry?.Event("anti_cheat.soft_clamp", tags, metrics);
 
@@ -100,9 +185,21 @@ public partial class PlayerNetworkDriverFishNet
             {
                 float allowed = Mathf.Max(0f, maxStep);
                 if (planarDist > allowed)
-                    predictedPos = _serverLastPos + planar.normalized * allowed + new Vector3(0f, Mathf.Clamp(delta.y, -maxVerticalSpeed * (float)dt, maxVerticalSpeed * (float)dt), 0f);
+                {
+                    // Clamp verso un massimo consentito
+                    predictedPos = _serverLastPos
+                                   + planar.normalized * allowed
+                                   + new Vector3(
+                                       0f,
+                                       Mathf.Clamp(delta.y,
+                                           -maxVerticalSpeed * dtF,
+                                           maxVerticalSpeed * dtF),
+                                       0f);
+                }
                 else
+                {
                     predictedPos = _serverLastPos;
+                }
             }
             else
             {
@@ -110,72 +207,89 @@ public partial class PlayerNetworkDriverFishNet
             }
 
             if (_anti is AntiCheatManager ac && ac.debugLogs && verboseNetLog)
-                Debug.LogWarning($"[AC] Soft-clamp seq={seq} clientDelta={planarDist:0.###} maxStep={maxStep:0.###} rttMs={_lastRttMs:0.0}");
+            {
+                Debug.LogWarning($"[AC] Soft-clamp seq={seq} clientDelta={planarDist:0.###} " +
+                                 $"maxStep={maxStep:0.###} rttMs={_lastRttMs:0.0}");
+            }
 
             _telemetry?.Increment($"client.{OwnerClientId}.anti_cheat.soft_clamps");
             _telemetry?.Increment("anti_cheat.soft_clamps");
         }
 
-        // NavMesh clamp telemetry
-        if (validateNavMesh && NavMesh.SamplePosition(predictedPos, out var nh, navMeshMaxSampleDist, NavMesh.AllAreas))
-            predictedPos = nh.position;
+        // BOOKMARK: NAVMESH_AND_VELOCITY
+        // Scegliamo la posizione finale: se input valido → integrazione server;
+        // se soft-clamp → predicted corretta.
+        Vector3 finalPos = ok ? serverIntegratedPos : predictedPos;
 
-        Vector3 deltaPos = predictedPos - _serverLastPos;
-        Vector3 vel = deltaPos / (float)dt;
+        if (validateNavMesh &&
+            NavMesh.SamplePosition(finalPos, out var nh, navMeshMaxSampleDist, NavMesh.AllAreas))
+        {
+            finalPos = nh.position;
+        }
 
+        Vector3 deltaPos = finalPos - _serverLastPos;
+        Vector3 vel = deltaPos / dtF;
+
+        // Limite verticale
         if (Mathf.Abs(vel.y) > maxVerticalSpeed)
         {
-            predictedPos.y = _serverLastPos.y;
-            deltaPos = predictedPos - _serverLastPos;
-            vel = deltaPos / (float)dt;
+            finalPos.y = _serverLastPos.y;
+            deltaPos = finalPos - _serverLastPos;
+            vel = deltaPos / dtF;
         }
+
         vel.y = 0f;
 
-        // keep prior serverLastPos used for later checks (planarErr)
+        // Aggiorna stato server
         Vector3 oldServerLast = _serverLastPos;
-        _serverLastPos = predictedPos;
+        _serverLastPos = finalPos;
 
+        // BOOKMARK: SNAPSHOT_BUILD
         byte anim = (byte)((vel.magnitude > 0.12f) ? (running ? 2 : 1) : 0);
-        var snap = new MovementSnapshot(predictedPos, vel, now, seq, anim);
+        var snap = new MovementSnapshot(finalPos, vel, now, seq, anim);
 
-        GetComponent<LagCompBuffer>()?.Push(predictedPos, vel, now);
+        // Lag compensation buffer per hit-scan server-side
+        GetComponent<LagCompBuffer>()?.Push(finalPos, vel, now);
 
-        // Decide whether to force full keyframe for reliability/hysteresis
+        // ---- Keyframe / full snapshot decision ----
         bool requireFull = false;
-        float planarErr = Vector3.Distance(predictedPos, oldServerLast);
+        float planarErr = Vector3.Distance(finalPos, oldServerLast);
 
-        int sinceKFcount = 0;
-        _sinceKeyframe.TryGetValue(Owner, out sinceKFcount);
-        if (sinceKFcount >= Math.Max(1, keyframeEvery / 2)) requireFull = true;
+        _sinceKeyframe.TryGetValue(Owner, out int sinceKFcount);
+        if (sinceKFcount >= Math.Max(1, keyframeEvery / 2))
+            requireFull = true;
 
-        if (planarErr > hardSnapDist * 0.9f && (now - _lastReconcileSentTime) < RECONCILE_COOLDOWN_SEC * 1.5)
+        // Se ci siamo appena riconciliati forte, meglio forzare full
+        if (planarErr > hardSnapDist * 0.9f &&
+            (now - _lastReconcileSentTime) < RECONCILE_COOLDOWN_SEC * 1.5)
         {
             requireFull = true;
             _telemetry?.Increment("reconcile.suppressed_in_favor_of_full");
         }
 
-        // Telemetry: broadcast decisions
         _telemetry?.Increment($"client.{OwnerClientId}.snap_broadcasts");
 
         if (requireFull)
         {
+            // Keyframe FULL al proprietario + observers
             short cellX = 0, cellY = 0;
             if (_chunk.TryGetCellOf(Owner, out var ccell))
             {
                 cellX = (short)ccell.x;
                 cellY = (short)ccell.y;
             }
-            byte[] full = PackedMovement.PackFull(snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq, cellX, cellY, _chunk.cellSize);
 
-            // compute state hash
+            byte[] full = PackedMovement.PackFull(
+                snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
+                cellX, cellY, _chunk.cellSize);
+
             ulong stateHash = ComputeStateHashForSnapshot(snap);
 
-            // store for retry and send
             _lastFullPayload[Owner] = full;
             _lastFullSentAt[Owner] = _netTime.Now();
             _fullRetryCount[Owner] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots)
+            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(Owner))
             {
                 var shards = BuildFecShards(full, fecShardSize, fecParityShards);
                 _lastFullShards[Owner] = shards;
@@ -184,12 +298,25 @@ public partial class PlayerNetworkDriverFishNet
                 int fullLen = full.Length;
                 uint messageId = _nextOutgoingMessageId++;
 
-                if (verboseNetLog) Debug.Log($"[Server.Debug] Sending full as shards messageId={messageId} fullLen={fullLen} fullHash=0x{fullHash:X16} totalShards={shards.Count}");
+                if (verboseNetLog)
+                {
+                    Debug.Log(
+                        $"[Server.Debug] Sending full as shards messageId={messageId} " +
+                        $"fullLen={fullLen} fullHash=0x{fullHash:X16} totalShards={shards.Count}");
+                }
+
                 for (int i = 0; i < shards.Count; i++)
                 {
                     var s = shards[i];
-                    if (verboseNetLog) Debug.Log($"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
-                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
+                    if (verboseNetLog)
+                    {
+                        Debug.Log(
+                            $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
+                    }
+
+                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(
+                        s, messageId, fullLen, fullHash);
+
                     TargetPackedShardTo(Owner, envelopeBytes);
                 }
             }
@@ -203,43 +330,73 @@ public partial class PlayerNetworkDriverFishNet
         }
         else
         {
-            SendTargetOwnerCorrection(seq, predictedPos);
+            // Niente full: mandiamo solo eventuale correzione dolce all'owner
+            SendTargetOwnerCorrection(seq, finalPos);
         }
 
+        // Broadcast agli altri client secondo interest management
         Server_BroadcastPacked(snap);
     }
 
     // ---------- Ping / ClockSync RPCs ----------
+
     [ServerRpc(RequireOwnership = false)]
     public void PingRequest(double clientSendTimeSeconds)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         double serverRecv = _netTime.Now();
         PingReply(Owner, clientSendTimeSeconds, serverRecv, _netTime.Now());
     }
 
     [TargetRpc]
-    public void PingReply(NetworkConnection conn, double clientSendTimeSeconds, double serverRecvTimeSeconds, double serverSendTimeSeconds)
+    public void PingReply(NetworkConnection conn,
+                          double clientSendTimeSeconds,
+                          double serverRecvTimeSeconds,
+                          double serverSendTimeSeconds)
     {
-        if (_shuttingDown || s_AppQuitting) return;
-        OnClientReceivePingReply(clientSendTimeSeconds, serverRecvTimeSeconds, serverSendTimeSeconds);
+        if (_shuttingDown || s_AppQuitting)
+            return;
+
+        OnClientReceivePingReply(
+            clientSendTimeSeconds,
+            serverRecvTimeSeconds,
+            serverSendTimeSeconds);
     }
 
-    void OnClientReceivePingReply(double clientSendTimeSeconds, double serverRecvTimeSeconds, double serverSendTimeSeconds)
+    void OnClientReceivePingReply(double clientSendTimeSeconds,
+                                  double serverRecvTimeSeconds,
+                                  double serverSendTimeSeconds)
     {
         double clientRecvTimeSeconds = _netTime.Now();
 
-        double rttMs = Math.Max(0.0, (clientRecvTimeSeconds - clientSendTimeSeconds) * 1000.0);
+        double rttMs = Math.Max(0.0,
+            (clientRecvTimeSeconds - clientSendTimeSeconds) * 1000.0);
         _lastRttMs = rttMs;
 
-        double serverMid = (serverRecvTimeSeconds + serverSendTimeSeconds) * 0.5;
-        double clientMid = clientSendTimeSeconds + (clientRecvTimeSeconds - clientSendTimeSeconds) * 0.5;
+        double serverMid =
+            (serverRecvTimeSeconds + serverSendTimeSeconds) * 0.5;
+        double clientMid =
+            clientSendTimeSeconds +
+            (clientRecvTimeSeconds - clientSendTimeSeconds) * 0.5;
+
         double offsetMs = (serverMid - clientMid) * 1000.0;
 
-        if (_clockOffsetEmaMs == 0.0) _clockOffsetEmaMs = offsetMs; else _clockOffsetEmaMs = (1.0 - CLOCK_ALPHA) * _clockOffsetEmaMs + CLOCK_ALPHA * offsetMs;
+        if (_clockOffsetEmaMs == 0.0)
+            _clockOffsetEmaMs = offsetMs;
+        else
+            _clockOffsetEmaMs =
+                (1.0 - CLOCK_ALPHA) * _clockOffsetEmaMs +
+                CLOCK_ALPHA * offsetMs;
+
         double sampleJ = Math.Abs(offsetMs - _clockOffsetEmaMs);
-        if (_clockOffsetJitterMs == 0.0) _clockOffsetJitterMs = sampleJ; else _clockOffsetJitterMs = (1.0 - CLOCK_ALPHA_JITTER) * _clockOffsetJitterMs + CLOCK_ALPHA_JITTER * sampleJ;
+        if (_clockOffsetJitterMs == 0.0)
+            _clockOffsetJitterMs = sampleJ;
+        else
+            _clockOffsetJitterMs =
+                (1.0 - CLOCK_ALPHA_JITTER) * _clockOffsetJitterMs +
+                CLOCK_ALPHA_JITTER * sampleJ;
 
         _clockOffsetSeconds = _clockOffsetEmaMs / 1000.0;
 
@@ -260,21 +417,20 @@ public partial class PlayerNetworkDriverFishNet
 
         var csm = GetComponentInChildren<ClockSyncManager>();
         if (csm != null)
-        {
             csm.RecordSample(rttMs, offsetMs);
-        }
     }
 
     public double GetEstimatedClientToServerOffsetSeconds()
-    {
-        return _clockOffsetSeconds;
-    }
+        => _clockOffsetSeconds;
 
-    public double GetLastMeasuredRttMs() => _lastRttMs;
+    public double GetLastMeasuredRttMs()
+        => _lastRttMs;
 
+    // BOOKMARK: SERVER_BROADCAST
     void Server_BroadcastPacked(MovementSnapshot snap)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         if (forceBroadcastAll || _chunk == null || Owner == null)
         {
@@ -300,9 +456,14 @@ public partial class PlayerNetworkDriverFishNet
             cellY = (short)cell.y;
         }
 
-        foreach (var conn in _tmpNear) TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, nearHz));
-        foreach (var conn in _tmpMid) TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, midHz));
-        foreach (var conn in _tmpFar) TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, farHz));
+        foreach (var conn in _tmpNear)
+            TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, nearHz));
+
+        foreach (var conn in _tmpMid)
+            TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, midHz));
+
+        foreach (var conn in _tmpFar)
+            TrySendPackedTo(conn, snap, cellX, cellY, now, 1.0 / Math.Max(1, farHz));
 
         _tmpNear.Clear();
         _tmpMid.Clear();
@@ -317,34 +478,53 @@ public partial class PlayerNetworkDriverFishNet
             cx = (short)cell.x;
             cy = (short)cell.y;
         }
+
         int cs = _chunk ? _chunk.cellSize : 128;
-        return PackedMovement.PackFull(snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq, cx, cy, cs);
+        return PackedMovement.PackFull(
+            snap.pos, snap.vel, snap.animState, snap.serverTime,
+            snap.seq, cx, cy, cs);
     }
 
-    void TrySendPackedTo(NetworkConnection conn, MovementSnapshot snap, short cellX, short cellY, double now, double interval)
+    void TrySendPackedTo(NetworkConnection conn,
+                         MovementSnapshot snap,
+                         short cellX, short cellY,
+                         double now,
+                         double interval)
     {
-        if (_shuttingDown || s_AppQuitting) return;
-        if (conn == null || !conn.IsActive) return;
-        if (_nextSendAt.TryGetValue(conn, out var t) && now < t) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
+        if (conn == null || !conn.IsActive)
+            return;
+        if (_nextSendAt.TryGetValue(conn, out var t) && now < t)
+            return;
 
         bool sendFull = false;
-        if (!_lastSentCell.TryGetValue(conn, out var lastCell)) sendFull = true;
-        else if (lastCell.cellX != cellX || lastCell.cellY != cellY) sendFull = true;
+
+        if (!_lastSentCell.TryGetValue(conn, out var lastCell))
+            sendFull = true;
+        else if (lastCell.cellX != cellX || lastCell.cellY != cellY)
+            sendFull = true;
+
         _lastSentCell[conn] = (cellX, cellY);
 
-        int sinceKF = 0;
-        _sinceKeyframe.TryGetValue(conn, out sinceKF);
-        if (keyframeEvery > 0 && sinceKF >= keyframeEvery) sendFull = true;
+        _sinceKeyframe.TryGetValue(conn, out int sinceKF);
+        if (keyframeEvery > 0 && sinceKF >= keyframeEvery)
+            sendFull = true;
 
-        if (debugForceFullSnapshots) sendFull = true;
+        if (debugForceFullSnapshots)
+            sendFull = true;
 
         byte[] payload = null;
 
         if (!sendFull && _lastSentSnap.TryGetValue(conn, out var last))
         {
             var lastSnapLocal = last;
-            payload = PackedMovement.PackDelta(in lastSnapLocal, snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                cellX, cellY, _chunk.cellSize, maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
+            payload = PackedMovement.PackDelta(
+                in lastSnapLocal,
+                snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
+                cellX, cellY, _chunk.cellSize,
+                maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
+
             if (payload == null)
             {
                 sendFull = true;
@@ -354,8 +534,10 @@ public partial class PlayerNetworkDriverFishNet
 
         if (sendFull)
         {
-            payload = PackedMovement.PackFull(snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
+            payload = PackedMovement.PackFull(
+                snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
                 cellX, cellY, _chunk.cellSize);
+
             _sinceKeyframe[conn] = 0;
 
             ulong stateHash = ComputeStateHashForSnapshot(snap);
@@ -364,7 +546,7 @@ public partial class PlayerNetworkDriverFishNet
             _lastFullSentAt[conn] = now;
             _fullRetryCount[conn] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots)
+            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(conn))
             {
                 var shards = BuildFecShards(payload, fecShardSize, fecParityShards);
                 _lastFullShards[conn] = shards;
@@ -373,12 +555,25 @@ public partial class PlayerNetworkDriverFishNet
                 int fullLen = payload.Length;
                 uint messageId = _nextOutgoingMessageId++;
 
-                if (verboseNetLog) Debug.Log($"[Server.Debug] Sending full as shards messageId={messageId} fullLen={fullLen} fullHash=0x{fullHash:X16} totalShards={shards.Count}");
+                if (verboseNetLog)
+                {
+                    Debug.Log(
+                        $"[Server.Debug] Sending full as shards messageId={messageId} " +
+                        $"fullLen={fullLen} fullHash=0x{fullHash:X16} totalShards={shards.Count}");
+                }
+
                 for (int i = 0; i < shards.Count; i++)
                 {
                     var s = shards[i];
-                    if (verboseNetLog) Debug.Log($"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
-                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
+                    if (verboseNetLog)
+                    {
+                        Debug.Log(
+                            $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
+                    }
+
+                    byte[] envelopeBytes =
+                        CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
+
                     TargetPackedShardTo(conn, envelopeBytes);
                 }
             }
@@ -391,12 +586,16 @@ public partial class PlayerNetworkDriverFishNet
         else
         {
             _sinceKeyframe[conn] = sinceKF + 1;
+
             var lastSnapLocal = _lastSentSnap[conn];
-            var deltaPayload = PackedMovement.PackDelta(in lastSnapLocal, snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                cellX, cellY, _chunk.cellSize, maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
+
+            byte[] deltaPayload = PackedMovement.PackDelta(
+                in lastSnapLocal,
+                snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
+                cellX, cellY, _chunk.cellSize,
+                maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
 
             byte[] deltaEnv = CreateEnvelopeBytes(deltaPayload);
-
             TargetPackedSnapshotTo(conn, deltaEnv, ComputeStateHashForSnapshot(snap));
         }
 
@@ -407,13 +606,22 @@ public partial class PlayerNetworkDriverFishNet
     [ObserversRpc]
     void ObserversPackedSnapshot(byte[] payload)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         int olen = payload?.Length ?? 0;
-        if (verboseNetLog) Debug.Log($"[Driver.Debug] ObserversPackedSnapshot len={olen} first8={BytesPreview(payload, 8)} envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
+
+        if (verboseNetLog)
+        {
+            Debug.Log(
+                $"[Driver.Debug] ObserversPackedSnapshot len={olen} first8={BytesPreview(payload, 8)} " +
+                $"envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
+        }
+
         if (payload == null || payload.Length < 8)
         {
-            if (verboseNetLog) Debug.LogWarning($"[Driver] Ignoring too-small observers payload len={payload?.Length ?? 0}");
+            if (verboseNetLog)
+                Debug.LogWarning($"[Driver] Ignoring too-small observers payload len={payload?.Length ?? 0}");
             return;
         }
 
@@ -421,30 +629,54 @@ public partial class PlayerNetworkDriverFishNet
         {
             if ((envObs.flags & 0x08) != 0)
             {
-                if (verboseNetLog) Debug.Log($"[Driver.Canary] observers canary id={envObs.messageId} len={envObs.payloadLen}");
+                if (verboseNetLog)
+                    Debug.Log($"[Driver.Canary] observers canary id={envObs.messageId} len={envObs.payloadLen}");
                 return;
             }
-            if (verboseNetLog) Debug.Log($"[Driver.Debug] ObserversPackedSnapshot envelope id={envObs.messageId} payloadLen={envObs.payloadLen} innerFirst8={BytesPreview(innerObs, 8)}");
+
+            if (verboseNetLog)
+            {
+                Debug.Log(
+                    $"[Driver.Debug] ObserversPackedSnapshot envelope id={envObs.messageId} " +
+                    $"payloadLen={envObs.payloadLen} innerFirst8={BytesPreview(innerObs, 8)}");
+            }
+
             payload = innerObs;
         }
         else
         {
-            if (verboseNetLog) Debug.Log($"[Driver.Debug] ObserversPackedSnapshot raw first8={BytesPreview(payload, 8)}");
+            if (verboseNetLog)
+            {
+                Debug.Log(
+                    $"[Driver.Debug] ObserversPackedSnapshot raw first8={BytesPreview(payload, 8)}");
+            }
         }
 
         HandlePackedPayload(payload);
     }
 
     [TargetRpc]
-    void TargetPackedSnapshotTo(NetworkConnection conn, byte[] payload, ulong stateHash)
+    void TargetPackedSnapshotTo(NetworkConnection conn,
+                                byte[] payload,
+                                ulong stateHash)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         int len = payload?.Length ?? 0;
-        if (verboseNetLog) Debug.Log($"[Driver.Debug] TargetPackedSnapshotTo conn={conn?.ClientId} len={len} first8={BytesPreview(payload, 8)} envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
+
+        if (verboseNetLog)
+        {
+            Debug.Log(
+                $"[Driver.Debug] TargetPackedSnapshotTo conn={conn?.ClientId} len={len} " +
+                $"first8={BytesPreview(payload, 8)} " +
+                $"envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
+        }
+
         if (payload == null || payload.Length < 8)
         {
-            if (verboseNetLog) Debug.LogWarning($"[Driver] Ignoring too-small payload len={payload?.Length ?? 0}");
+            if (verboseNetLog)
+                Debug.LogWarning($"[Driver] Ignoring too-small payload len={payload?.Length ?? 0}");
             return;
         }
 
@@ -452,17 +684,34 @@ public partial class PlayerNetworkDriverFishNet
         {
             if ((env.flags & 0x08) != 0)
             {
-                if (verboseNetLog) Debug.Log($"[Driver.Canary] full canary id={env.messageId} len={env.payloadLen}");
+                if (verboseNetLog)
+                    Debug.Log($"[Driver.Canary] full canary id={env.messageId} len={env.payloadLen}");
                 return;
             }
-            if (verboseNetLog) Debug.Log($"[Driver.Debug] TargetPackedSnapshotTo envelope id={env.messageId} payloadLen={env.payloadLen} innerFirst8={BytesPreview(inner, 8)}");
-            try { _incomingEnvelopeMeta[env.messageId] = (env.payloadHash, env.payloadLen); }
+
+            if (verboseNetLog)
+            {
+                Debug.Log(
+                    $"[Driver.Debug] TargetPackedSnapshotTo envelope id={env.messageId} " +
+                    $"payloadLen={env.payloadLen} innerFirst8={BytesPreview(inner, 8)}");
+            }
+
+            try
+            {
+                _incomingEnvelopeMeta[env.messageId] = (env.payloadHash, env.payloadLen);
+            }
             catch { }
+
             payload = inner;
         }
         else
         {
-            if (verboseNetLog) Debug.Log($"[Driver.Debug] TargetPackedSnapshotTo raw first8={BytesPreview(payload, 8)} firstByte={(payload.Length > 0 ? payload[0] : 0)}");
+            if (verboseNetLog)
+            {
+                Debug.Log(
+                    $"[Driver.Debug] TargetPackedSnapshotTo raw first8={BytesPreview(payload, 8)} " +
+                    $"firstByte={(payload.Length > 0 ? payload[0] : 0)}");
+            }
         }
 
         HandlePackedPayload(payload, stateHash);
@@ -471,13 +720,23 @@ public partial class PlayerNetworkDriverFishNet
     [TargetRpc]
     void TargetPackedShardTo(NetworkConnection conn, byte[] shard)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         int slen = shard?.Length ?? 0;
-        if (verboseNetLog) Debug.Log($"[Driver.Debug] TargetPackedShardTo conn={conn?.ClientId} len={slen} first8={BytesPreview(shard, 8)} envelope={EnvelopeUtil.TryUnpack(shard, out var _, out var _)}");
+
+        if (verboseNetLog)
+        {
+            Debug.Log(
+                $"[Driver.Debug] TargetPackedShardTo conn={conn?.ClientId} len={slen} " +
+                $"first8={BytesPreview(shard, 8)} " +
+                $"envelope={EnvelopeUtil.TryUnpack(shard, out var _, out var _)}");
+        }
+
         if (shard == null || shard.Length < 8)
         {
-            if (verboseNetLog) Debug.LogWarning($"[Driver] Ignoring too-small shard len={shard?.Length ?? 0}");
+            if (verboseNetLog)
+                Debug.LogWarning($"[Driver] Ignoring too-small shard len={shard?.Length ?? 0}");
             return;
         }
 
@@ -487,25 +746,31 @@ public partial class PlayerNetworkDriverFishNet
     [ServerRpc(RequireOwnership = false)]
     void ServerAckFullSnapshot(uint ackSeq, ulong clientStateHash)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
+
         var conn = base.Owner;
-        if (conn == null) return;
+        if (conn == null)
+            return;
+
         _lastFullPayload.Remove(conn);
         _lastFullSentAt.Remove(conn);
         _fullRetryCount.Remove(conn);
         _lastFullShards.Remove(conn);
+
         _telemetry?.Increment($"client.{OwnerClientId}.full_ack");
     }
 
+    // BOOKMARK: OWNER_CORRECTION
     void SendTargetOwnerCorrection(uint serverSeq, Vector3 serverPos)
     {
         try
         {
             TargetOwnerCorrection(Owner, serverSeq, serverPos);
         }
-        catch (Exception)
+        catch
         {
-            // ignore if Owner not available in this context
+            // Owner potrebbe non essere valido in alcune fasi di shutdown.
         }
     }
 }
