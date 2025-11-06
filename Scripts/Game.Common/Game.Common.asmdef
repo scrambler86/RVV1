@@ -1,0 +1,9 @@
+{
+  "name": "Game.Common",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "autoReferenced": true,
+  "defineConstraints": []
+}
