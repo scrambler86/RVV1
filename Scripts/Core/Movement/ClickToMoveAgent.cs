@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.EventSystems;
@@ -47,13 +47,15 @@ public class ClickToMoveAgent : MonoBehaviour
 
     void Awake()
     {
-        if (!cam) cam = Camera.main;
+        if (!cam)
+            cam = Camera.main;
+
         _agent = GetComponent<NavMeshAgent>();
         _ctrl = GetComponent<PlayerControllerCore>();
         CacheNetworkDriver();
 
-        // Important: NavMeshAgent is ONLY used for pathfinding/steering,
-        // movement is actually applied via Rigidbody in PlayerControllerCore.
+        // Il NavMeshAgent è usato solo per pathfinding/steering.
+        // Il movimento reale è gestito da PlayerControllerCore / Rigidbody.
         _agent.updatePosition = false;
         _agent.updateRotation = false;
         _agent.autoRepath = true;
@@ -71,7 +73,9 @@ public class ClickToMoveAgent : MonoBehaviour
 
     void LateUpdate()
     {
-        if (!cam) cam = Camera.main;
+        if (!cam)
+            cam = Camera.main;
+
         if (_uiLayer == -1 && !string.IsNullOrEmpty(uiLayerName))
             _uiLayer = LayerMask.NameToLayer(uiLayerName);
     }
@@ -94,6 +98,8 @@ public class ClickToMoveAgent : MonoBehaviour
     {
         if (_driver != null)
             return _driver.HasInputAuthority(allowServerOnlyInput);
+
+        // Fallback: se non c'è driver, non blocchiamo l’input.
         return true;
     }
 
@@ -104,7 +110,7 @@ public class ClickToMoveAgent : MonoBehaviour
         if (!cam)
             return;
 
-        // se abbiamo bloccato il click perché era su UI, sblocchiamo quando rilascio
+        // Se il precedente click è stato consumato dalla UI, sblocca al rilascio
         if (_uiConsumeUntilUp && Input.GetMouseButtonUp(clickButton))
             _uiConsumeUntilUp = false;
 
@@ -112,41 +118,41 @@ public class ClickToMoveAgent : MonoBehaviour
 
         if (Input.GetMouseButtonDown(clickButton))
         {
-            // Se eravamo in consumo-UI, e non sto bypassando, non fare nulla
+            // Se in stato consume-UI e non bypasso, ignora
             if (_uiConsumeUntilUp && !bypass)
                 return;
 
-            // Non permettere click su UI (es: inventory) se non tengo ALT
+            // Blocca click su UI se non bypasso
             if (!bypass && blockUIClicks && IsPointerOverUILayer())
             {
                 _uiConsumeUntilUp = true;
                 return;
             }
 
-            // debounce: click troppo ravvicinato ignorato
+            // Debounce anti-spam
             if (enableDebounce && Time.time < _nextClick)
                 return;
             _nextClick = Time.time + clickCooldown;
 
-            // Ray dalla camera verso il mondo
+            // Raycast da camera
             Ray r = cam.ScreenPointToRay(Input.mousePosition);
             if (!Physics.Raycast(r, out RaycastHit hit, 5000f, ~0, QueryTriggerInteraction.Ignore))
                 return;
 
-            // Proiettiamo il punto sul NavMesh
+            // Proietta sul NavMesh
             if (!NavMesh.SamplePosition(hit.point, out NavMeshHit nh, maxSampleDist, NavMesh.AllAreas))
                 return;
 
-            // evita spam se il nuovo punto è praticamente identico al vecchio
+            // Evita micro-spostamenti inutili
             if (enableMinRepathDistance && _hasLastGoal &&
                 Vector3.Distance(nh.position, _lastGoal) < minRepathDistance)
                 return;
 
-            // se clicco praticamente sotto i piedi, inutile
+            // Evita click quasi sotto i piedi
             if (Vector3.Distance(transform.position, nh.position) <= _agent.stoppingDistance + 0.05f)
                 return;
 
-            // imposta la nuova path
+            // Imposta path
             _agent.isStopped = false;
             _agent.ResetPath();
             _agent.SetDestination(nh.position);
@@ -169,6 +175,7 @@ public class ClickToMoveAgent : MonoBehaviour
         {
             position = Input.mousePosition
         };
+
         _uiHits.Clear();
         EventSystem.current.RaycastAll(ped, _uiHits);
 
@@ -177,11 +184,13 @@ public class ClickToMoveAgent : MonoBehaviour
             var go = _uiHits[i].gameObject;
             if (!go)
                 continue;
+
             Transform t = go.transform;
             while (t != null)
             {
                 if (t.gameObject.layer == _uiLayer)
                     return true;
+
                 t = t.parent;
             }
         }
@@ -189,19 +198,19 @@ public class ClickToMoveAgent : MonoBehaviour
         return false;
     }
 
-    // --- Queste funzioni sono IMPORTANTI per PlayerControllerCore e per il server ---
+    // --- API usate da PlayerControllerCore / server ---
 
     public void CancelPath()
     {
         if (!_agent)
             return;
+
         _agent.isStopped = true;
         if (_agent.hasPath)
             _agent.ResetPath();
+
         _hasLastGoal = false;
-        // riallinea l'agent alla nostra posizione attuale
         _agent.nextPosition = transform.position;
-        // ATTENZIONE: NON chiamare _ctrl.StopMovement() qua per non creare loop
     }
 
     public Vector3 GetDesiredVelocity()
