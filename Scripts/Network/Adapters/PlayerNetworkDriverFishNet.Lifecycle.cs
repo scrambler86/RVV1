@@ -19,7 +19,7 @@ namespace Game.Networking.Adapters
             if (!_agent) _agent = GetComponent<NavMeshAgent>();
             if (!_ctm) _ctm = GetComponent<ClickToMoveAgent>();
 
-            _netTime = new NetTimeAdapter();
+            _netTime = new NetTimeFishNet();
             _anti = FindObjectOfType<AntiCheatManager>();
             _chunk = FindObjectOfType<ChunkManager>();
             _telemetry = FindObjectOfType<TelemetryManager>();
