@@ -182,7 +182,7 @@ public class PlayerControllerCore : MonoBehaviour
             if (dv.sqrMagnitude > 0.0001f)
                 desiredDir = dv.normalized;
 
-            if (_ctm.RemainingDistance() <= Mathf.Max(_ctm.StoppingDistance(), 0.15f))
+            if (_ctm.RemainingDistance() <= Mathf.Max(_ctm.StoppingDistance, 0.15f))
                 _ctm.CancelPath();
         }
         else if (inputRaw.sqrMagnitude > 0.01f)

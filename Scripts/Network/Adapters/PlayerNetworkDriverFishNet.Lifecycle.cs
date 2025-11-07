@@ -3,6 +3,7 @@ using FishNet;
 using FishNet.Connection;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
