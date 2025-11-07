@@ -11,7 +11,7 @@ namespace Game.Networking.Adapters
     {
         [Header("Camera input")]
         public Camera cam;
-        public int clickButton = 1; // 0=LMB,1=RMB
+        public int clickButton = 1; // 0 = LMB, 1 = RMB
 
         [Header("NavMesh sampling")]
         public float maxSampleDist = 12f;
@@ -111,7 +111,7 @@ namespace Game.Networking.Adapters
             if (!cam)
                 return;
 
-            // Se l’ultimo click è stato consumato dalla UI, sblocca al rilascio
+            // Se l’ultimo click è stato consumato dalla UI, sblocca al rilascio.
             if (_uiConsumeUntilUp && Input.GetMouseButtonUp(clickButton))
                 _uiConsumeUntilUp = false;
 
@@ -119,41 +119,41 @@ namespace Game.Networking.Adapters
 
             if (Input.GetMouseButtonDown(clickButton))
             {
-                // Se in stato consume-UI e non bypasso, ignora
+                // In consume-UI e non bypasso → ignora.
                 if (_uiConsumeUntilUp && !bypass)
                     return;
 
-                // Blocca click sulla UI se non bypasso
+                // Blocca click sulla UI se non bypasso.
                 if (!bypass && blockUIClicks && IsPointerOverUILayer())
                 {
                     _uiConsumeUntilUp = true;
                     return;
                 }
 
-                // Debounce anti-spam
+                // Debounce anti-spam.
                 if (enableDebounce && Time.time < _nextClick)
                     return;
                 _nextClick = Time.time + clickCooldown;
 
-                // Raycast da camera
+                // Raycast da camera.
                 Ray r = cam.ScreenPointToRay(Input.mousePosition);
                 if (!Physics.Raycast(r, out RaycastHit hit, 5000f, ~0, QueryTriggerInteraction.Ignore))
                     return;
 
-                // Proietta sul NavMesh
+                // Proietta sul NavMesh.
                 if (!NavMesh.SamplePosition(hit.point, out NavMeshHit nh, maxSampleDist, NavMesh.AllAreas))
                     return;
 
-                // Evita micro-spostamenti inutili
+                // Evita micro-spostamenti inutili.
                 if (enableMinRepathDistance && _hasLastGoal &&
                     Vector3.Distance(nh.position, _lastGoal) < minRepathDistance)
                     return;
 
-                // Evita click quasi sotto i piedi
+                // Evita click quasi sotto i piedi.
                 if (Vector3.Distance(transform.position, nh.position) <= _agent.stoppingDistance + 0.05f)
                     return;
 
-                // Imposta path
+                // Imposta path.
                 _agent.isStopped = false;
                 _agent.ResetPath();
                 _agent.SetDestination(nh.position);
@@ -224,10 +224,7 @@ namespace Game.Networking.Adapters
             return _agent ? _agent.remainingDistance : Mathf.Infinity;
         }
 
-        public float StoppingDistance()
-        {
-            return _agent ? _agent.stoppingDistance : 0.15f;
-        }
+        public float StoppingDistance => _agent ? _agent.stoppingDistance : 0.15f;
 
         public Vector3 SteeringTarget()
         {
