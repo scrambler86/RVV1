@@ -1,6 +1,7 @@
 using System;
 using FishNet;
 using FishNet.Connection;
+using FishNet.Object;
 using UnityEngine;
 using UnityEngine.AI;
 using Game.Network;
@@ -51,11 +52,15 @@ namespace Game.Networking.Adapters
             }
 
             var tm = InstanceFinder.TimeManager;
-            double rtt = (tm != null) ? Math.Max(0.01, tm.RoundTripTime / 1000.0) : 0.06;
+            double rtt = (tm != null)
+                ? Math.Max(0.01, tm.RoundTripTime / 1000.0)
+                : 0.06;
+
             _back = _backTarget = ClampD(rtt * 0.6, minBack, maxBack);
 
             _haveAnchor = false;
             _baseSnap = default;
+
             _tokens = maxInputsPerSecond + burstAllowance;
             _lastRefill = _netTime.Now();
             _shuttingDown = false;

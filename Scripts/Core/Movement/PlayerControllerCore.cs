@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEngine.AI;
 using Game.Networking.Adapters;
 
@@ -107,8 +107,10 @@ public class PlayerControllerCore : MonoBehaviour
         if (!visualRoot)
             visualRoot = transform;
 
+        // protezione anti "mi gira tutta la mappa"
         _canRotateVisualRoot = (visualRoot != transform);
 
+        // snap iniziale a terra
         Vector3 p = transform.position;
         p = SnapToGround(p);
         _rb.position = p;

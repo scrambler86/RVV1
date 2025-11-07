@@ -11,7 +11,8 @@ namespace Game.Networking.Adapters
     {
         [Header("Camera input")]
         public Camera cam;
-        public int clickButton = 1; // 0 = LMB, 1 = RMB
+        // 0 = LMB, 1 = RMB
+        public int clickButton = 1;
 
         [Header("NavMesh sampling")]
         public float maxSampleDist = 12f;
