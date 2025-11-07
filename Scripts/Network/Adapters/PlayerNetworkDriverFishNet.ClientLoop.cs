@@ -6,198 +6,200 @@ using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 
-public partial class PlayerNetworkDriverFishNet
+namespace Game.Networking.Adapters
 {
-    // ---------- main loop ----------
-    void FixedUpdate()
+    public partial class PlayerNetworkDriverFishNet
     {
-        if (!IsSpawned || _shuttingDown || s_AppQuitting)
-            return;
-
-        ProcessShardBufferTimeouts();
-
-        if (IsOwner)
-            TickOwnerClient();
-        else
-            TickRemoteClient();
-
-        if (IsServerInitialized)
-            _chunk?.UpdatePlayerChunk(this, _rb.position);
-
-        if (IsServerStarted)
-            TickServerResendLoop();
-    }
-
-    /// <summary>
-    /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
-    /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
-    /// </summary>
-    void TickOwnerClient()
-    {
-        Owner_Send();
-        Owner_ApplyElasticCorrection();
-        Owner_ProcessHardSnap();
-        Owner_ProcessReconciliation();
-    }
-
-    /// <summary>
-    /// Updates interpolation for remote-controlled instances.
-    /// </summary>
-    void TickRemoteClient()
-    {
-        Remote_Update();
-    }
-
-    /// <summary>
-    /// Handles retry scheduling for reliable full snapshots on the server.
-    /// </summary>
-    void TickServerResendLoop()
-    {
-        if (_lastFullPayload.Count == 0 && _lastFullShards.Count == 0)
-            return;
-
-        double now = _netTime.Now();
-        _serverRetryScratch.Clear();
-
-        foreach (var kv in _lastFullPayload)
+        // ---------- main loop ----------
+        void FixedUpdate()
         {
-            var conn = kv.Key;
-            if (conn == null || !conn.IsActive)
-                continue;
+            if (!IsSpawned || _shuttingDown || s_AppQuitting)
+                return;
 
-            if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
-                continue;
+            ProcessShardBufferTimeouts();
 
-            int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-            if (tries >= FULL_RETRY_MAX)
-                continue;
+            if (IsOwner)
+                TickOwnerClient();
+            else
+                TickRemoteClient();
 
-            if (now - sentAt > FULL_RETRY_SECONDS)
-                _serverRetryScratch.Add(conn);
+            if (IsServerInitialized)
+                _chunk?.UpdatePlayerChunk(this, _rb.position);
+
+            if (IsServerStarted)
+                TickServerResendLoop();
         }
 
-        foreach (var kv in _lastFullShards)
+        /// <summary>
+        /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
+        /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
+        /// </summary>
+        void TickOwnerClient()
         {
-            var conn = kv.Key;
-            if (conn == null || !conn.IsActive)
-                continue;
-
-            if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
-                continue;
-
-            int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-            if (tries >= FULL_RETRY_MAX)
-                continue;
-
-            if (now - sentAt > FULL_RETRY_SECONDS)
-                _serverRetryScratch.Add(conn);
+            Owner_Send();
+            Owner_ApplyElasticCorrection();
+            Owner_ProcessHardSnap();
+            Owner_ProcessReconciliation();
         }
 
-        foreach (var conn in _serverRetryScratch)
+        /// <summary>
+        /// Updates interpolation for remote-controlled instances.
+        /// </summary>
+        void TickRemoteClient()
         {
-            if (_lastFullShards.TryGetValue(conn, out var shards) && shards != null && shards.Count > 0)
+            Remote_Update();
+        }
+
+        /// <summary>
+        /// Handles retry scheduling for reliable full snapshots on the server.
+        /// </summary>
+        void TickServerResendLoop()
+        {
+            if (_lastFullPayload.Count == 0 && _lastFullShards.Count == 0)
+                return;
+
+            double now = _netTime.Now();
+            _serverRetryScratch.Clear();
+
+            foreach (var kv in _lastFullPayload)
             {
-                byte[] lastFull = null;
-                if (_lastFullPayload.TryGetValue(conn, out var payloadBytes))
-                    lastFull = payloadBytes;
+                var conn = kv.Key;
+                if (conn == null || !conn.IsActive)
+                    continue;
 
-                ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
-                int fullLen = (lastFull != null) ? lastFull.Length : 0;
+                if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
+                    continue;
 
-                uint messageId = _nextOutgoingMessageId++;
-                if (verboseNetLog)
+                int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
+                if (tries >= FULL_RETRY_MAX)
+                    continue;
+
+                if (now - sentAt > FULL_RETRY_SECONDS)
+                    _serverRetryScratch.Add(conn);
+            }
+
+            foreach (var kv in _lastFullShards)
+            {
+                var conn = kv.Key;
+                if (conn == null || !conn.IsActive)
+                    continue;
+
+                if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
+                    continue;
+
+                int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
+                if (tries >= FULL_RETRY_MAX)
+                    continue;
+
+                if (now - sentAt > FULL_RETRY_SECONDS)
+                    _serverRetryScratch.Add(conn);
+            }
+
+            foreach (var conn in _serverRetryScratch)
+            {
+                if (_lastFullShards.TryGetValue(conn, out var shards) && shards != null && shards.Count > 0)
                 {
-                    Debug.Log(
-                        $"[Server.Debug] Retry sending shards messageId={messageId} " +
-                        $"totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
-                }
+                    byte[] lastFull = null;
+                    if (_lastFullPayload.TryGetValue(conn, out var payloadBytes))
+                        lastFull = payloadBytes;
 
-                foreach (var shard in shards)
-                {
+                    ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
+                    int fullLen = (lastFull != null) ? lastFull.Length : 0;
+
+                    uint messageId = _nextOutgoingMessageId++;
                     if (verboseNetLog)
-                        Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
+                    {
+                        Debug.Log(
+                            $"[Server.Debug] Retry sending shards messageId={messageId} " +
+                            $"totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
+                    }
 
-                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
-                    TargetPackedShardTo(conn, envelopeBytes);
+                    foreach (var shard in shards)
+                    {
+                        if (verboseNetLog)
+                            Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
+
+                        byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
+                        TargetPackedShardTo(conn, envelopeBytes);
+                    }
                 }
+                else if (_lastFullPayload.TryGetValue(conn, out var payload))
+                {
+                    byte[] payloadEnv = CreateEnvelopeBytes(payload);
+                    TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(payload));
+                }
+
+                _lastFullSentAt[conn] = _netTime.Now();
+                _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries)
+                    ? previousTries + 1
+                    : 1;
+
+                _telemetry?.Increment("pack.full_retry");
             }
-            else if (_lastFullPayload.TryGetValue(conn, out var payload))
+
+            _serverRetryScratch.Clear();
+        }
+
+        /// <summary>
+        /// Applies owner-side elastic correction towards the authoritative server target.
+        /// </summary>
+        void Owner_ApplyElasticCorrection()
+        {
+            if (!_isApplyingElastic)
+                return;
+
+            _elasticElapsed += Time.fixedDeltaTime;
+            float t = Mathf.Clamp01(_elasticElapsed / _elasticDuration);
+            float ease = 1f - Mathf.Pow(1f - t, 3f);
+
+            Vector3 current = _rb.position;
+            Vector3 target = Vector3.Lerp(_elasticStartPos, _elasticTargetPos, ease);
+            float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime * _elasticCurrentMultiplier;
+            Vector3 next = Vector3.MoveTowards(current, target, maxAllowed);
+
+            if (remoteMoveVisualOnly && _core && _core.visualRoot != null)
+                _core.visualRoot.position = next;
+            else
+                _rb.position = next;
+
+            if (_agent)
+                _agent.nextPosition = next;
+
+            float applied = Vector3.Distance(current, next);
+            _telemetry?.Observe($"client.{OwnerClientId}.elastic_applied_cm", applied * 100.0);
+            _telemetry?.Observe($"client.{OwnerClientId}.elastic_progress", ease * 100.0);
+
+            _elasticCurrentMultiplier *= correctionDecay;
+
+            if (t >= 1f || Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
             {
-                byte[] payloadEnv = CreateEnvelopeBytes(payload);
-                TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(payload));
+                _isApplyingElastic = false;
+                _elasticElapsed = 0f;
+                _elasticCurrentMultiplier = 1f;
+                _telemetry?.Increment($"client.{OwnerClientId}.elastic_completed");
             }
-
-            _lastFullSentAt[conn] = _netTime.Now();
-            _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries)
-                ? previousTries + 1
-                : 1;
-
-            _telemetry?.Increment("pack.full_retry");
         }
 
-        _serverRetryScratch.Clear();
-    }
-
-    /// <summary>
-    /// Applies owner-side elastic correction towards the authoritative server target.
-    /// </summary>
-    void Owner_ApplyElasticCorrection()
-    {
-        if (!_isApplyingElastic)
-            return;
-
-        _elasticElapsed += Time.fixedDeltaTime;
-        float t = Mathf.Clamp01(_elasticElapsed / _elasticDuration);
-        float ease = 1f - Mathf.Pow(1f - t, 3f);
-
-        Vector3 current = _rb.position;
-        Vector3 target = Vector3.Lerp(_elasticStartPos, _elasticTargetPos, ease);
-        float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime * _elasticCurrentMultiplier;
-        Vector3 next = Vector3.MoveTowards(current, target, maxAllowed);
-
-        if (remoteMoveVisualOnly && _core && _core.visualRoot != null)
-            _core.visualRoot.position = next;
-        else
-            _rb.position = next;
-
-        if (_agent)
-            _agent.nextPosition = next;
-
-        float applied = Vector3.Distance(current, next);
-        _telemetry?.Observe($"client.{OwnerClientId}.elastic_applied_cm", applied * 100.0);
-        _telemetry?.Observe($"client.{OwnerClientId}.elastic_progress", ease * 100.0);
-
-        _elasticCurrentMultiplier *= correctionDecay;
-
-        if (t >= 1f || Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
+        /// <summary>
+        /// Performs pending hard snap correction (owner).
+        /// </summary>
+        void Owner_ProcessHardSnap()
         {
-            _isApplyingElastic = false;
-            _elasticElapsed = 0f;
-            _elasticCurrentMultiplier = 1f;
-            _telemetry?.Increment($"client.{OwnerClientId}.elastic_completed");
-        }
-    }
+            if (!_doHardSnapNextFixed || _isApplyingElastic)
+                return;
 
-    /// <summary>
-    /// Performs pending hard snap correction (owner).
-    /// </summary>
-    void Owner_ProcessHardSnap()
-    {
-        if (!_doHardSnapNextFixed || _isApplyingElastic)
-            return;
+            Vector3 current = _rb.position;
+            Vector3 target = _pendingHardSnap;
+            float distance = Vector3.Distance(current, target);
 
-        Vector3 current = _rb.position;
-        Vector3 target = _pendingHardSnap;
-        float distance = Vector3.Distance(current, target);
+            if (distance > hardSnapDist * 1.1f &&
+                (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
+            {
+                Vector3 next = Vector3.MoveTowards(
+                    current, target,
+                    maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
 
-        if (distance > hardSnapDist * 1.1f &&
-            (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
-        {
-            Vector3 next = Vector3.MoveTowards(
-                current, target,
-                maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
-
-            _rb.position = next;
+                _rb.position = next;
             if (_agent) _agent.nextPosition = next;
             if (Vector3.Distance(next, target) < 0.05f)
                 _doHardSnapNextFixed = false;
@@ -508,5 +510,6 @@ public partial class PlayerNetworkDriverFishNet
             });
 
         _telemetry?.Increment($"client.{OwnerClientId}.elastic_started");
+    }
     }
 }
