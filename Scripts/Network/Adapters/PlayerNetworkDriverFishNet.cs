@@ -179,13 +179,13 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 
     // ---------- Reconcile cooldown ----------
     private double _lastReconcileSentTime = -9999.0;
-    private const double RECONCILE_COOLDOWN_SEC = 0.20; // default, tune as needed
+    private const double RECONCILE_COOLDOWN_SEC = 0.20;
 
     // ---------- Reliable full-keyframe + FEC storage ----------
     private readonly Dictionary<NetworkConnection, byte[]> _lastFullPayload = new();
     private readonly Dictionary<NetworkConnection, double> _lastFullSentAt = new();
     private readonly Dictionary<NetworkConnection, int> _fullRetryCount = new();
-    private readonly Dictionary<NetworkConnection, List<byte[]>> _lastFullShards = new(); // shards incl parity
+    private readonly Dictionary<NetworkConnection, List<byte[]>> _lastFullShards = new();
 
     private const double FULL_RETRY_SECONDS = 0.6;
     private const int FULL_RETRY_MAX = 4;
@@ -247,7 +247,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
 
         _crcFailCount++;
 
-        // fuori finestra → log riepilogo + reset
         if (now - _crcFirstFailTime >= CRC_LOG_WINDOW_SECONDS)
         {
             int toLog = Math.Min(_crcFailCount, CRC_LOG_MAX_PER_WINDOW);
@@ -265,7 +264,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
             return;
         }
 
-        // burst locale → un log immediato
         if (_crcFailCount == CRC_LOG_MAX_PER_WINDOW &&
             (now - _crcLastLogTime) > 0.5)
         {
@@ -275,7 +273,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         }
     }
 
-    // ------- ShardBufferRegistry -------
     private sealed class ShardBufferRegistry
     {
         private readonly Dictionary<uint, List<ShardInfo>> _buffers = new();
@@ -371,7 +368,6 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         return sb.ToString();
     }
 
-    // Helper: create an envelope byte[] with proper header fields filled (for single full/delta payloads)
     byte[] CreateEnvelopeBytes(byte[] payload)
     {
         var env = new Envelope
@@ -386,14 +382,12 @@ public partial class PlayerNetworkDriverFishNet : NetworkBehaviour, IPlayerNetwo
         return EnvelopeUtil.Pack(env, payload);
     }
 
-    // Helper: create an envelope for a shard but attach message-level metadata (full payload len/hash) for reassembly verification
     byte[] CreateEnvelopeBytesForShard(byte[] shard, uint messageId, int fullPayloadLen, ulong fullPayloadHash)
     {
         var env = new Envelope
         {
             messageId = messageId,
             seq = _lastSeqSent,
-            // payloadLen/payloadHash si riferiscono al payload COMPLETO, non al singolo shard
             payloadLen = fullPayloadLen,
             payloadHash = fullPayloadHash,
             flags = 0

@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using FishNet.Connection;
+using Game.Networking.Adapters;
 
 /// <summary>
 /// Minimal ChunkManager compatibile con PlayerNetworkDriverFishNet.

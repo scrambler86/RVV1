@@ -99,7 +99,7 @@ public partial class PlayerNetworkDriverFishNet
             }
             catch
             {
-                // swallow: during shutdown/unload it's safe ignorare
+                // safe to ignore during shutdown/unload
             }
         }
     }

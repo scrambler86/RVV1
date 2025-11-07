@@ -58,7 +58,35 @@ public partial class PlayerNetworkDriverFishNet
         return result;
     }
 
+    // ---------- FEC suppression (per-connection) ----------
+
+    bool IsFecSuppressed(NetworkConnection conn)
+    {
+        if (conn == null)
+            return false;
+
+        if (_fecSuppressedUntil.TryGetValue(conn, out double until))
+        {
+            double now = _netTime.Now();
+            if (now < until)
+                return true;
+
+            _fecSuppressedUntil.Remove(conn);
+        }
+
+        return false;
+    }
+
+    void SuppressFecTemporarily(NetworkConnection conn)
+    {
+        if (conn == null)
+            return;
+
+        _fecSuppressedUntil[conn] = _netTime.Now() + FEC_DISABLE_DURATION_SECONDS;
+    }
+
     // ---------- Input dal client → server authoritative ----------
+
     [ServerRpc(RequireOwnership = false)]
     void CmdSendInput(Vector3 dir,
                       Vector3 clientPredictedPos,
@@ -83,7 +111,7 @@ public partial class PlayerNetworkDriverFishNet
 
         _serverLastTime = now;
 
-        // Predicted pos del client: usata solo per anti-cheat / soft clamp
+        // Predicted pos del client (solo per anti-cheat / diagnostica)
         Vector3 predictedPos = clientPredictedPos;
 
         // Integrazione authoritative lato server
@@ -93,7 +121,7 @@ public partial class PlayerNetworkDriverFishNet
             Vector3.Distance(serverIntegratedPos, clientPredictedPos) * 100.0);
 
         // Stima RTT e slack di tolleranza
-        double oneWay = Math.Max(0.0, now - timestamp); // circa metà RTT
+        double oneWay = Math.Max(0.0, now - timestamp); // ≈ metà RTT
         _lastRttMs = oneWay * 2000.0;
 
         float stepSlack = Mathf.Clamp(
@@ -256,7 +284,7 @@ public partial class PlayerNetworkDriverFishNet
             _lastFullSentAt[Owner] = _netTime.Now();
             _fullRetryCount[Owner] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots && IsFecSuppressed(Owner) == false)
+            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(Owner))
             {
                 var shards = BuildFecShards(full, fecShardSize, fecParityShards);
                 _lastFullShards[Owner] = shards;
@@ -516,7 +544,7 @@ public partial class PlayerNetworkDriverFishNet
             _lastFullSentAt[conn] = now;
             _fullRetryCount[conn] = 0;
 
-            if (fecParityShards > 0 && !debugForceFullSnapshots && IsFecSuppressed(conn) == false)
+            if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(conn))
             {
                 var shards = BuildFecShards(payload, fecShardSize, fecParityShards);
                 _lastFullShards[conn] = shards;
@@ -733,6 +761,7 @@ public partial class PlayerNetworkDriverFishNet
     }
 
     // ---------- Correction owner ----------
+
     void SendTargetOwnerCorrection(uint serverSeq, Vector3 serverPos)
     {
         try
@@ -741,7 +770,7 @@ public partial class PlayerNetworkDriverFishNet
         }
         catch
         {
-            // Owner può non essere valido durante shutdown / despawn
+            // Owner può non essere valido durante shutdown / despawn, ignora
         }
     }
 }

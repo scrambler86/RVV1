@@ -106,7 +106,11 @@ public partial class PlayerNetworkDriverFishNet
 
                 uint messageId = _nextOutgoingMessageId++;
                 if (verboseNetLog)
-                    Debug.Log($"[Server.Debug] Retry sending shards messageId={messageId} totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
+                {
+                    Debug.Log(
+                        $"[Server.Debug] Retry sending shards messageId={messageId} " +
+                        $"totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
+                }
 
                 foreach (var shard in shards)
                 {
@@ -124,7 +128,10 @@ public partial class PlayerNetworkDriverFishNet
             }
 
             _lastFullSentAt[conn] = _netTime.Now();
-            _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries) ? previousTries + 1 : 1;
+            _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries)
+                ? previousTries + 1
+                : 1;
+
             _telemetry?.Increment("pack.full_retry");
         }
 
@@ -142,6 +149,7 @@ public partial class PlayerNetworkDriverFishNet
         _elasticElapsed += Time.fixedDeltaTime;
         float t = Mathf.Clamp01(_elasticElapsed / _elasticDuration);
         float ease = 1f - Mathf.Pow(1f - t, 3f);
+
         Vector3 current = _rb.position;
         Vector3 target = Vector3.Lerp(_elasticStartPos, _elasticTargetPos, ease);
         float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime * _elasticCurrentMultiplier;
@@ -182,9 +190,13 @@ public partial class PlayerNetworkDriverFishNet
         Vector3 target = _pendingHardSnap;
         float distance = Vector3.Distance(current, target);
 
-        if (distance > hardSnapDist * 1.1f && (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
+        if (distance > hardSnapDist * 1.1f &&
+            (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
         {
-            Vector3 next = Vector3.MoveTowards(current, target, maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
+            Vector3 next = Vector3.MoveTowards(
+                current, target,
+                maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
+
             _rb.position = next;
             if (_agent) _agent.nextPosition = next;
             if (Vector3.Distance(next, target) < 0.05f)
@@ -245,10 +257,13 @@ public partial class PlayerNetworkDriverFishNet
         Vector3 desired = Vector3.Lerp(current, _reconcileTarget, alpha);
         Vector3 capped = Vector3.MoveTowards(current, desired, maxAllowed);
         Vector3 smoothed = Vector3.Lerp(current, capped, 1f - reconciliationSmoothing);
+
         _rb.MovePosition(smoothed);
         if (_agent) _agent.nextPosition = smoothed;
+
         if ((smoothed - _reconcileTarget).sqrMagnitude < 0.0004f)
             _reconcileActive = false;
+
         _telemetry?.Increment("reconcile.smooth_steps");
     }
 
@@ -263,11 +278,13 @@ public partial class PlayerNetworkDriverFishNet
     // ---------- owner side ----------
     void Owner_Send()
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
         _sendDt = 1f / Mathf.Max(1, sendRateHz);
         _sendTimer += Time.fixedDeltaTime;
-        if (_sendTimer < _sendDt) return;
+        if (_sendTimer < _sendDt)
+            return;
         _sendTimer -= _sendDt;
 
         _lastSeqSent++;
@@ -279,31 +296,30 @@ public partial class PlayerNetworkDriverFishNet
         Vector3[] pathCorners = isCTM ? _ctm.GetPathCorners() : null;
 
         double localClientTime = Time.timeAsDouble;
-        double timestampToSend;
-        if (_clockSync != null)
-        {
-            timestampToSend = _clockSync.ClientToServerTime(localClientTime);
-        }
-        else
-        {
-            timestampToSend = _netTime.Now();
-        }
+        double timestampToSend =
+            _clockSync != null
+                ? _clockSync.ClientToServerTime(localClientTime)
+                : _netTime.Now();
 
-        _telemetry?.Observe($"client.{OwnerClientId}.sent_timestamp_diff_ms", (timestampToSend - localClientTime) * 1000.0);
+        _telemetry?.Observe(
+            $"client.{OwnerClientId}.sent_timestamp_diff_ms",
+            (timestampToSend - localClientTime) * 1000.0);
 
         CmdSendInput(dir, pos, running, _lastSeqSent, isCTM, pathCorners, timestampToSend);
 
         var input = new InputState(dir, running, _lastSeqSent, _sendDt, localClientTime);
         _inputBuf.Enqueue(input);
-        if (_inputBuf.Count > 128) _inputBuf.Dequeue();
+        if (_inputBuf.Count > 128)
+            _inputBuf.Dequeue();
     }
 
     // ---------- remotes render ----------
     void Remote_Update()
     {
-        if (_buffer.Count == 0) return;
+        if (_buffer.Count == 0)
+            return;
 
-        _back = Mathf.Lerp((float)_back, (float)_backTarget, Time.deltaTime * 1.0f); // slower smoothing
+        _back = Mathf.Lerp((float)_back, (float)_backTarget, Time.deltaTime * 1.0f);
         double now = _netTime.Now();
         double renderT = now - _back;
 
@@ -327,7 +343,7 @@ public partial class PlayerNetworkDriverFishNet
         bool lowVel = (A.vel.sqrMagnitude < 0.0001f && B.vel.sqrMagnitude < 0.0001f);
         bool tinyMove = (A.pos - B.pos).sqrMagnitude < 0.000004f;
 
-        bool useHermite = (span > 0.02 && span < 0.5 && _emaJitter < 0.12); // guard to avoid overshoot under jitter
+        bool useHermite = (span > 0.02 && span < 0.5 && _emaJitter < 0.12);
 
         Vector3 target = (!useHermite || lowVel || tinyMove)
             ? Vector3.Lerp(A.pos, B.pos, t)
@@ -357,16 +373,23 @@ public partial class PlayerNetworkDriverFishNet
         float k = 1f - Mathf.Exp(-remoteVisualLerpSpeed * Time.deltaTime);
         Vector3 smoothed = Vector3.Lerp(current, target, k);
 
-        if (remoteMoveVisualOnly && vr) vr.position = smoothed; else _rb.position = smoothed;
+        if (remoteMoveVisualOnly && vr)
+            vr.position = smoothed;
+        else
+            _rb.position = smoothed;
 
         Vector3 moveVec = smoothed - _remoteLastRenderPos;
         float dt = Mathf.Max(Time.deltaTime, 1e-6f);
         float rawSpeed = moveVec.magnitude / dt;
-        _remoteDisplaySpeed = Mathf.Lerp(_remoteDisplaySpeed, rawSpeed, Time.deltaTime * remoteAnimSmooth);
+        _remoteDisplaySpeed = Mathf.Lerp(
+            _remoteDisplaySpeed,
+            rawSpeed,
+            Time.deltaTime * remoteAnimSmooth);
 
         if (vr != null)
         {
-            Vector3 dir = moveVec; dir.y = 0f;
+            Vector3 dir = moveVec;
+            dir.y = 0f;
             if (dir.sqrMagnitude > 0.0004f && _remoteDisplaySpeed > 0.5f)
             {
                 Quaternion face = Quaternion.LookRotation(dir.normalized);
@@ -378,16 +401,17 @@ public partial class PlayerNetworkDriverFishNet
         _remoteLastRenderPos = smoothed;
 
         _core.SafeAnimSpeedRaw(_remoteDisplaySpeed);
-        bool shouldRun = (animState == 2) && (_remoteDisplaySpeed > remoteRunSpeedThreshold * 0.75f);
+        bool shouldRun = (animState == 2) &&
+                         (_remoteDisplaySpeed > remoteRunSpeedThreshold * 0.75f);
         _core.SafeAnimRun(shouldRun);
     }
 
     [TargetRpc]
     void TargetOwnerCorrection(NetworkConnection conn, uint serverSeq, Vector3 serverPos)
     {
-        if (_shuttingDown || s_AppQuitting) return;
+        if (_shuttingDown || s_AppQuitting)
+            return;
 
-        // cooldown check to avoid oscillation
         double now = _netTime.Now();
         if (now - _lastReconcileSentTime < RECONCILE_COOLDOWN_SEC)
         {
@@ -401,7 +425,10 @@ public partial class PlayerNetworkDriverFishNet
         Vector3 corrected = serverPos;
         foreach (var inp in _inputBuf)
         {
-            float spd = inp.running ? _core.speed * _core.runMultiplier : _core.speed;
+            float spd = inp.running
+                ? _core.speed * _core.runMultiplier
+                : _core.speed;
+
             if (inp.dir.sqrMagnitude > 1e-6f)
                 corrected += inp.dir.normalized * spd * inp.dt;
         }
@@ -409,56 +436,64 @@ public partial class PlayerNetworkDriverFishNet
         float errXZ = Vector2.Distance(
             new Vector2(_rb.position.x, _rb.position.z),
             new Vector2(corrected.x, corrected.z));
-        if (errXZ < deadZone) return;
+
+        if (errXZ < deadZone)
+            return;
 
         if (ignoreNetworkY)
             corrected.y = transform.position.y;
 
-        // Telemetry: reconcile request (rich event)
         var rTags = new Dictionary<string, string>
         {
             { "clientId", OwnerClientId.ToString() },
             { "reason", "server_correction" }
         };
+
         var rMetrics = new Dictionary<string, double>
         {
             { "errXZ_cm", errXZ * 100.0 },
             { "rtt_ms", _lastRttMs }
         };
-        int sc = 0; var sample = new List<string>();
-        foreach (var inp in _inputBuf) { if (sc++ >= 6) break; sample.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}"); }
-        if (sample.Count > 0) rTags["input_sample"] = string.Join("|", sample);
+
+        int sc = 0;
+        var sample = new List<string>();
+        foreach (var inp in _inputBuf)
+        {
+            if (sc++ >= 6)
+                break;
+            sample.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
+        }
+
+        if (sample.Count > 0)
+            rTags["input_sample"] = string.Join("|", sample);
+
         _telemetry?.Event("reconcile.requested", rTags, rMetrics);
 
-        // set reconcile target and mark cooldown used
         _reconcileTarget = corrected;
         _reconcileActive = true;
         _lastReconcileSentTime = now;
 
-        _telemetry?.Increment($"client.{OwnerClientId}.reconcile.requested_smooth");
+        _telemetry?.Increment(
+            $"client.{OwnerClientId}.reconcile.requested_smooth");
 
-        // Start elastic correction on client (if owner) instead of immediate hard-snap
         if (IsOwner)
-        {
             StartElasticCorrection(corrected);
-        }
     }
 
     // ------- elastic helper -------
     void StartElasticCorrection(Vector3 target)
     {
-        // Only start if noticeable
         float dist = Vector3.Distance(_rb.position, target);
-        if (dist < correctionMinVisible) return;
+        if (dist < correctionMinVisible)
+            return;
 
         _isApplyingElastic = true;
         _elasticStartPos = _rb.position;
         _elasticTargetPos = target;
         _elasticElapsed = 0f;
-        _elasticDuration = Mathf.Max(0.05f, correctionDurationSeconds); // clamp minimal duration
+        _elasticDuration = Mathf.Max(0.05f, correctionDurationSeconds);
         _elasticCurrentMultiplier = correctionInitialMultiplier;
 
-        // telemetry event
         _telemetry?.Event("elastic.start",
             new Dictionary<string, string>
             {

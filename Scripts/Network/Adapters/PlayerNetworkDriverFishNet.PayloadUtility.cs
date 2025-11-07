@@ -48,8 +48,7 @@ public partial class PlayerNetworkDriverFishNet
         }
         else if (verboseNetLog)
         {
-            Debug.Log(
-                $"[Driver.Debug] HandlePackedShard raw first8={BytesPreview(shard, 8)}");
+            Debug.Log($"[Driver.Debug] HandlePackedShard raw first8={BytesPreview(shard, 8)}");
         }
 
         if (innerShard == null || innerShard.Length < 8)
@@ -72,6 +71,7 @@ public partial class PlayerNetworkDriverFishNet
         var list = _shardRegistry.GetOrCreate(messageId, total, Time.realtimeSinceStartup);
 
         if (idx < list.Count)
+        {
             list[idx] = new ShardInfo
             {
                 total = total,
@@ -79,6 +79,7 @@ public partial class PlayerNetworkDriverFishNet
                 dataLen = dataLen,
                 data = data
             };
+        }
 
         _telemetry?.Increment("pack.shards_received");
 
@@ -163,7 +164,7 @@ public partial class PlayerNetworkDriverFishNet
             }
             else
             {
-                // Not enough info to reconstruct, wait for more shards.
+                // Not enough info to reconstruct, wait for more shards
                 return;
             }
         }
@@ -207,7 +208,6 @@ public partial class PlayerNetworkDriverFishNet
                         $"computedHash=0x{computed:X16} serverHash=0x{meta.hash:X16} " +
                         $"computedLen={payloadLength} serverLen={meta.len}");
 
-                    // In caso di mismatch, chiedi snapshot completo preferendo NO FEC.
                     RequestFullSnapshotFromServer(true);
                 }
                 else if (verboseNetLog)
@@ -250,10 +250,7 @@ public partial class PlayerNetworkDriverFishNet
         foreach (var id in _shardTimeoutScratch)
         {
             _telemetry?.Increment("pack.shards_timeout");
-
-            // Troppe scadenze → chiedi snapshot completo, preferibilmente senza FEC.
             RequestFullSnapshotFromServer(true);
-
             CleanupShardBuffer(id);
             _incomingEnvelopeMeta.Remove(id);
             _canaryMessageIds.Remove(id);
@@ -286,7 +283,7 @@ public partial class PlayerNetworkDriverFishNet
             return;
         }
 
-        // Inserisci in buffer in ordine di serverTime
+        // ordered insert by serverTime
         if (_buffer.Count == 0 || snap.serverTime >= _buffer[_buffer.Count - 1].serverTime)
         {
             _buffer.Add(snap);
@@ -326,7 +323,6 @@ public partial class PlayerNetworkDriverFishNet
         if (_back <= 0.0)
             _back = _backTarget;
 
-        // Verifica hash stato
         ulong clientHash = ComputeStateHashForSnapshot(snap);
         if (clientHash != serverStateHash)
         {
@@ -348,7 +344,6 @@ public partial class PlayerNetworkDriverFishNet
         }
         else
         {
-            // Snapshot ok → resetta la finestra errori/FEC
             NoteSuccessfulSnapshotDelivery();
         }
     }
@@ -426,7 +421,6 @@ public partial class PlayerNetworkDriverFishNet
     {
         double now = Time.realtimeSinceStartup;
 
-        // Cooldown per evitare spam richieste
         if (now - _lastFullRequestTime < FULL_REQUEST_COOLDOWN_SECONDS)
         {
             if (verboseNetLog)
@@ -439,7 +433,6 @@ public partial class PlayerNetworkDriverFishNet
 
         _lastFullRequestTime = now;
 
-        // Finestra mobile per capire se FEC sta fallendo spesso
         if (now - _fullRequestWindowStart > FULL_REQUEST_WINDOW_SECONDS)
         {
             _fullRequestWindowStart = now;
@@ -501,7 +494,6 @@ public partial class PlayerNetworkDriverFishNet
             return shards;
 
         int effectiveShardSize = Math.Min(shardSize, Math.Max(1, payload.Length));
-
         int dataShards = (payload.Length + effectiveShardSize - 1) / effectiveShardSize;
         int totalShards = dataShards + parityCount;
 
@@ -520,7 +512,7 @@ public partial class PlayerNetworkDriverFishNet
             shards.Add(s);
         }
 
-        // Parity shards (XOR semplice)
+        // Parity shards (XOR)
         for (int p = 0; p < parityCount; p++)
         {
             int maxLen = effectiveShardSize;
