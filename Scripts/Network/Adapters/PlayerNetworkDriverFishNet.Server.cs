@@ -12,7 +12,7 @@ namespace Game.Networking.Adapters
 {
     public partial class PlayerNetworkDriverFishNet
     {
-        private const int DEFAULT_CHUNK_CELL_SIZE = 128;
+        
 
         // ==================== SERVER ====================
 
