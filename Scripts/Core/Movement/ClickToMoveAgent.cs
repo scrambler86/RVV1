@@ -44,11 +44,12 @@ namespace Game.Networking.Adapters
 
         private bool _uiConsumeUntilUp;
 
-        public bool HasPath => _agent &&
-                               _agent.enabled &&
-                               _agent.isOnNavMesh &&
-                               _agent.hasPath &&
-                               !_agent.isStopped;
+        public bool HasPath =>
+            _agent &&
+            _agent.enabled &&
+            _agent.isOnNavMesh &&
+            _agent.hasPath &&
+            !_agent.isStopped;
 
         void Awake()
         {

@@ -12,8 +12,6 @@ namespace Game.Networking.Adapters
 {
     public partial class PlayerNetworkDriverFishNet
     {
-        
-
         // ==================== SERVER ====================
 
         bool RateLimitOk(double now)

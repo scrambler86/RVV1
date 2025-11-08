@@ -250,7 +250,6 @@ namespace Game.Networking.Adapters
 
             _crcFailCount++;
 
-            // finestra chiusa → log riepilogo
             if (now - _crcFirstFailTime >= CRC_LOG_WINDOW_SECONDS)
             {
                 int toLog = Math.Min(_crcFailCount, CRC_LOG_MAX_PER_WINDOW);
@@ -268,7 +267,6 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // burst → log immediato singolo
             if (_crcFailCount == CRC_LOG_MAX_PER_WINDOW &&
                 (now - _crcLastLogTime) > 0.5)
             {
@@ -342,6 +340,7 @@ namespace Game.Networking.Adapters
         }
 
         // ------- PUBLIC WRAPPERS (for external hooks/helpers) -------
+
         public void HandlePackedShardPublic(byte[] shard)
         {
             HandlePackedShard(shard);

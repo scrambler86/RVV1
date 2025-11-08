@@ -30,16 +30,15 @@ namespace Game.Networking.Adapters
                 TickServerResendLoop();
         }
 
-        // compatibility wrapper: delegate to implementation in PayloadUtility
+        // Mantiene vivo il buffer shard (timeout, cleanup).
+        // Implementazione effettiva in un altro partial (PayloadUtility): CheckShardBufferTimeouts().
         void ProcessShardBufferTimeouts()
         {
-            // CheckShardBufferTimeouts is implemented in PayloadUtility partial
             CheckShardBufferTimeouts();
         }
 
         /// <summary>
-        /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
-        /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
+        /// Owner-side: invio input, elastic correction, hard snap, reconcile.
         /// </summary>
         void TickOwnerClient()
         {
@@ -50,7 +49,7 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Updates interpolation for remote-controlled instances.
+        /// Remote-side: sola interpolazione / extrapolazione.
         /// </summary>
         void TickRemoteClient()
         {
@@ -58,7 +57,7 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Handles retry scheduling for reliable full snapshots on the server.
+        /// Server-side: retry per full snapshot affidabili (FEC / full fallback).
         /// </summary>
         void TickServerResendLoop()
         {
@@ -68,6 +67,7 @@ namespace Game.Networking.Adapters
             double now = _netTime.Now();
             _serverRetryScratch.Clear();
 
+            // Verifica payload completi in attesa di ACK
             foreach (var kv in _lastFullPayload)
             {
                 var conn = kv.Key;
@@ -85,6 +85,7 @@ namespace Game.Networking.Adapters
                     _serverRetryScratch.Add(conn);
             }
 
+            // Verifica shard FEC in attesa di ACK
             foreach (var kv in _lastFullShards)
             {
                 var conn = kv.Key;
@@ -102,6 +103,7 @@ namespace Game.Networking.Adapters
                     _serverRetryScratch.Add(conn);
             }
 
+            // Retry effettivo
             foreach (var conn in _serverRetryScratch)
             {
                 if (_lastFullShards.TryGetValue(conn, out var shards) && shards != null && shards.Count > 0)
@@ -126,7 +128,8 @@ namespace Game.Networking.Adapters
                         if (verboseNetLog)
                             Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
 
-                        byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
+                        byte[] envelopeBytes =
+                            CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
                         TargetPackedShardTo(conn, envelopeBytes);
                     }
                 }
@@ -148,16 +151,17 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Applies owner-side elastic correction towards the authoritative server target.
+        /// Owner-side elastic correction verso target autorevole.
         /// </summary>
         void Owner_ApplyElasticCorrection()
         {
             if (!_isApplyingElastic)
                 return;
 
-            // Short-circuit to avoid micro-oscillation when player effectively at rest
             float lastPlanarSpeed = (_core != null) ? _core.DebugPlanarSpeed : 0f;
             float distToTarget = Vector3.Distance(_rb.position, _elasticTargetPos);
+
+            // Evita micro jitter quando il player è praticamente fermo vicino al target
             if (lastPlanarSpeed < 0.02f && distToTarget < Mathf.Max(0.06f, correctionMinVisible))
             {
                 _isApplyingElastic = false;
@@ -200,7 +204,7 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Performs pending hard snap correction (owner).
+        /// Hard snap owner-side se necessario.
         /// </summary>
         void Owner_ProcessHardSnap()
         {
@@ -211,7 +215,7 @@ namespace Game.Networking.Adapters
             Vector3 target = _pendingHardSnap;
             float distance = Vector3.Distance(current, target);
 
-            // if small distance, do smooth MovePosition to avoid physics teleport jitter
+            // Se vicino, snap morbido con MovePosition
             if (distance <= 0.15f)
             {
                 _rb.MovePosition(target);
@@ -220,7 +224,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // if very large and we must warp, perform safe kinematic warp once
+            // Se molto lontano, warp sicuro una volta
             if (distance > hardSnapDist * 1.5f)
             {
                 bool prevKinematic = _rb.isKinematic;
@@ -233,19 +237,20 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // else approach with capped MoveTowards (smooth snap)
+            // Altrimenti avvicina con MoveTowards
             Vector3 next = Vector3.MoveTowards(
                 current, target,
                 maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
 
             _rb.MovePosition(next);
             if (_agent) _agent.nextPosition = next;
+
             if (Vector3.Distance(next, target) < 0.05f)
                 _doHardSnapNextFixed = false;
         }
 
         /// <summary>
-        /// Reconciles local rigidbody state with the authoritative server snapshot.
+        /// Reconcile dolce verso lo stato server authoritative.
         /// </summary>
         void Owner_ProcessReconciliation()
         {
@@ -254,11 +259,13 @@ namespace Game.Networking.Adapters
 
             float lastPlanarSpeed = (_core != null) ? _core.DebugPlanarSpeed : 0f;
 
-            // short-circuit: if almost at target and near-zero velocity, finish
             Vector3 current = _rb.position;
             Vector3 toTarget = _reconcileTarget - current;
             float distance = toTarget.magnitude;
-            if (lastPlanarSpeed < 0.02f && distance < Mathf.Max(0.06f, correctionMinVisible))
+
+            // Se quasi allineato e fermo, termina
+            if (lastPlanarSpeed < 0.02f &&
+                distance < Mathf.Max(0.06f, correctionMinVisible))
             {
                 _reconcileActive = false;
                 return;
@@ -270,6 +277,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
+            // Se molto distante → hard snap (con rate limit)
             if (distance > hardSnapDist)
             {
                 double now = _netTime.Now();
@@ -288,15 +296,19 @@ namespace Game.Networking.Adapters
                     Vector3 step = Vector3.ClampMagnitude(toTarget, maxAllowed);
                     Vector3 next = current + step;
                     next = Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
+
                     _rb.MovePosition(next);
                     if (_agent) _agent.nextPosition = next;
                     _telemetry?.Increment("reconcile.rate_limited_snaps");
                 }
+
                 return;
             }
 
+            // Smooth reconcile
             float alpha = 1f - Mathf.Exp(-reconcileRate * Time.fixedDeltaTime * 0.66f);
             float maxAllowedFinal = maxCorrectionSpeed * Time.fixedDeltaTime;
+
             Vector3 desired = Vector3.Lerp(current, _reconcileTarget, alpha);
             Vector3 capped = Vector3.MoveTowards(current, desired, maxAllowedFinal);
             Vector3 smoothed = Vector3.Lerp(current, capped, 1f - reconciliationSmoothing);
@@ -310,7 +322,7 @@ namespace Game.Networking.Adapters
             _telemetry?.Increment("reconcile.smooth_steps");
         }
 
-        // ---------- owner side ----------
+        // ---------- owner input send ----------
         void Owner_Send()
         {
             if (_shuttingDown || s_AppQuitting)
@@ -348,7 +360,7 @@ namespace Game.Networking.Adapters
                 _inputBuf.Dequeue();
         }
 
-        // ---------- remotes render ----------
+        // ---------- remoti render ----------
         void Remote_Update()
         {
             if (_buffer.Count == 0)
@@ -366,9 +378,6 @@ namespace Game.Networking.Adapters
             CleanupOld(renderT - 0.35);
         }
 
-        /// <summary>
-        /// Blends between two authoritative snapshots for smooth remote presentation.
-        /// </summary>
         void Remote_RenderInterpolated(MovementSnapshot A, MovementSnapshot B, double renderT)
         {
             double span = B.serverTime - A.serverTime;
@@ -377,7 +386,6 @@ namespace Game.Networking.Adapters
 
             bool lowVel = (A.vel.sqrMagnitude < 0.0001f && B.vel.sqrMagnitude < 0.0001f);
             bool tinyMove = (A.pos - B.pos).sqrMagnitude < 0.000004f;
-
             bool useHermite = (span > 0.03 && span < 0.5 && _emaJitter < 0.06);
 
             Vector3 target = (!useHermite || lowVel || tinyMove)
@@ -387,9 +395,6 @@ namespace Game.Networking.Adapters
             DriveRemote(target, A.animState);
         }
 
-        /// <summary>
-        /// Falls back to extrapolation when the buffer cannot provide a future bracket.
-        /// </summary>
         void Remote_RenderExtrapolated(double now)
         {
             MovementSnapshot last = _buffer[_buffer.Count - 1];
@@ -533,8 +538,14 @@ namespace Game.Networking.Adapters
                 new Dictionary<string, string>
                 {
                     { "clientId", OwnerClientId.ToString() },
-                    { "startPos", $"{_elasticStartPos.x:0.00},{_elasticStartPos.y:0.00},{_elasticStartPos.z:0.00}" },
-                    { "targetPos", $"{_elasticTargetPos.x:0.00},{_elasticTargetPos.y:0.00},{_elasticTargetPos.z:0.00}" }
+                    {
+                        "startPos",
+                        $"{_elasticStartPos.x:0.00},{_elasticStartPos.y:0.00},{_elasticStartPos.z:0.00}"
+                    },
+                    {
+                        "targetPos",
+                        $"{_elasticTargetPos.x:0.00},{_elasticTargetPos.y:0.00},{_elasticTargetPos.z:0.00}"
+                    }
                 },
                 new Dictionary<string, double>
                 {

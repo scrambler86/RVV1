@@ -6,8 +6,7 @@ using FishNet.Object;
 using FishNet.Connection;
 using Game.Networking.Adapters;
 
-// CanaryRuntime: invia payload di test (canary) ai client per verificare integrità trasporto
-
+// CanaryRuntime: invia payload di test (canary) ai client per verificare integrità del trasporto.
 public class CanaryRuntime : NetworkBehaviour
 {
     [Header("Canary")]
@@ -18,6 +17,7 @@ public class CanaryRuntime : NetworkBehaviour
     public bool autoRun = false;
     public bool useShards = true;
     public bool enabledRuntime = true;
+
     [Header("Logging")]
     public bool verboseLogs = false;
 
@@ -42,6 +42,7 @@ public class CanaryRuntime : NetworkBehaviour
     {
         base.OnStartServer();
         if (!enabledRuntime) return;
+
         if (autoRun)
             InvokeRepeating(nameof(BroadcastOnce), 1f, intervalSec);
     }
@@ -65,32 +66,41 @@ public class CanaryRuntime : NetworkBehaviour
 
     public void BroadcastOnce(bool shards)
     {
-        if (!IsServerInitialized || !enabledRuntime) return;
+        if (!IsServerInitialized || !enabledRuntime)
+            return;
+
         var dict = InstanceFinder.ServerManager?.Clients;
-        if (dict == null || dict.Count == 0) return;
+        if (dict == null || dict.Count == 0)
+            return;
 
         foreach (var kv in dict)
         {
             var conn = kv.Value;
-            if (conn == null) continue;
+            if (conn == null)
+                continue;
+
             SendCanaryTo(conn, shards);
         }
     }
 
     public void SendCanaryTo(NetworkConnection conn, bool shards)
     {
-        if (!IsServerInitialized || conn == null || _canaryPayload == null) return;
+        if (!IsServerInitialized || conn == null || _canaryPayload == null)
+            return;
 
         var driver = FindObjectOfType<PlayerNetworkDriverFishNet>();
         if (driver == null)
         {
-            if (verboseLogs) Debug.LogWarning("[Canary] Driver non trovato, annullo invio.");
+            if (verboseLogs)
+                Debug.LogWarning("[Canary] PlayerNetworkDriverFishNet non trovato, annullo invio.");
             return;
         }
 
         if (shards && parity > 0)
         {
+            // Usa FEC per shard canary; marca come CANARY per evitare decoding come movimento.
             List<byte[]> sList = FecReedSolomon.BuildShards(_canaryPayload, shardSize, parity);
+
             ulong fullHash = EnvelopeUtil.ComputeHash64(_canaryPayload);
             int fullLen = _canaryPayload.Length;
             uint seq = (uint)Environment.TickCount;
@@ -99,36 +109,38 @@ public class CanaryRuntime : NetworkBehaviour
             for (int i = 0; i < sList.Count; i++)
             {
                 var shardBytes = sList[i];
-                Envelope env = new Envelope
+                var env = new Envelope
                 {
                     messageId = messageId,
                     seq = seq,
                     payloadLen = fullLen,
                     payloadHash = fullHash,
-                    flags = 0x4
+                    // 0x08 = CANARY flag (usato dal driver), 0x04 opzionale per tipo shard.
+                    flags = 0x08 | 0x04
                 };
                 var packed = EnvelopeUtil.Pack(env, shardBytes);
                 driver.SendPackedShardToClient(conn, packed);
             }
 
-            if (verboseLogs || true)
+            if (verboseLogs)
                 Debug.Log($"[Canary] SHARDS sent to {conn.ClientId}, totalShards={sList.Count} fullLen={fullLen}");
         }
         else
         {
             uint seq = (uint)Environment.TickCount;
-            Envelope env = new Envelope
+            var env = new Envelope
             {
                 messageId = (uint)(DateTime.UtcNow.Ticks & 0xFFFFFFFF),
                 seq = seq,
                 payloadLen = _canaryPayload.Length,
                 payloadHash = EnvelopeUtil.ComputeHash64(_canaryPayload),
-                flags = 0x8 | 0x1
+                // 0x08 = CANARY, 0x01 = snapshot/full.
+                flags = 0x08 | 0x01
             };
             var packed = EnvelopeUtil.Pack(env, _canaryPayload);
             driver.SendPackedSnapshotToClient(conn, packed, env.payloadHash);
 
-            if (verboseLogs || true)
+            if (verboseLogs)
                 Debug.Log($"[Canary] SNAPSHOT sent to {conn.ClientId}, len={_canaryPayload.Length}");
         }
     }

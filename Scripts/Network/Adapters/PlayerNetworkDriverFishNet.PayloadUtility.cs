@@ -9,8 +9,7 @@ namespace Game.Networking.Adapters
 {
     public partial class PlayerNetworkDriverFishNet
     {
-        // BOOKMARK: SHARD_INFO_CLASS
-        // Internal helper to hold per-shard dataLen and bytes
+        // --- Shard info interno ---
         private class ShardInfo
         {
             public ushort total;
@@ -19,7 +18,8 @@ namespace Game.Networking.Adapters
             public byte[] data;
         }
 
-        // BOOKMARK: HANDLE_PACKED_SHARD
+        // --- Gestione shard FEC / riassemblaggio ---
+
         void HandlePackedShard(byte[] shard)
         {
             uint messageId = 0;
@@ -85,7 +85,7 @@ namespace Game.Networking.Adapters
 
             _telemetry?.Increment("pack.shards_received");
 
-            // Check if all data shards are present or try to recover with FEC
+            // Hai già tutti i data shards?
             bool all = true;
             for (int i = 0; i < list.Count; ++i)
             {
@@ -114,7 +114,7 @@ namespace Game.Networking.Adapters
                     }
                 }
 
-                // If exactly one data shard missing and we have parity, try XOR-based recovery
+                // Se manca esattamente 1 data shard e abbiamo parità, prova XOR-recovery
                 if (missingCount == 1 && parityCount > 0)
                 {
                     int shardPadSize = fecShardSize;
@@ -127,7 +127,11 @@ namespace Game.Networking.Adapters
 
                         if (sInfo != null)
                         {
-                            Array.Copy(sInfo.data, 0, padded[i], 0,
+                            Array.Copy(
+                                sInfo.data,
+                                0,
+                                padded[i],
+                                0,
                                 Math.Min(sInfo.dataLen, shardPadSize));
                         }
                     }
@@ -144,10 +148,7 @@ namespace Game.Networking.Adapters
                     int recoveredDataLen = shardPadSize;
                     if (missingDataIdx == dataShards - 1)
                     {
-                        int sumPrev = 0;
-                        for (int i = 0; i < missingDataIdx; i++)
-                            sumPrev += list[i].dataLen;
-
+                        // ultimo shard dati, lunghezza può essere minore
                         recoveredDataLen = Math.Min(recoveredDataLen, shardPadSize);
                     }
 
@@ -166,12 +167,12 @@ namespace Game.Networking.Adapters
                 }
                 else
                 {
-                    // Not enough info to reconstruct, wait for more shards
+                    // Non abbastanza info per ricostruire → aspetta altri shard
                     return;
                 }
             }
 
-            // Reassemble payload from data shards
+            // Riassembla payload
             int totalShardsFinal = _shardRegistry.GetTotalCount(messageId);
             int parityCnt = fecParityShards;
             int dataCount = Math.Max(1, totalShardsFinal - parityCnt);
@@ -237,13 +238,11 @@ namespace Game.Networking.Adapters
             HandlePackedPayload(payload);
         }
 
-        // BOOKMARK: SHARD_BUFFER_CLEANUP
         void CleanupShardBuffer(uint messageId)
         {
             _shardRegistry.Forget(messageId);
         }
 
-        // BOOKMARK: SHARD_BUFFER_TIMEOUTS
         void CheckShardBufferTimeouts()
         {
             double now = Time.realtimeSinceStartup;
@@ -261,20 +260,21 @@ namespace Game.Networking.Adapters
             _shardTimeoutScratch.Clear();
         }
 
-        // BOOKMARK: HANDLE_PACKED_PAYLOAD
+        // --- Decodifica payload ---
+
         void HandlePackedPayload(byte[] payload)
         {
             ulong h = ComputeStateHashFromPayload(payload);
             HandlePackedPayload(payload, h);
         }
 
-        // BOOKMARK: HANDLE_PACKED_PAYLOAD_WITH_HASH
         void HandlePackedPayload(byte[] payload, ulong serverStateHash)
         {
             MovementSnapshot snap;
             int cs = _chunk ? _chunk.cellSize : 128;
 
-            if (!PackedMovement.TryUnpack(payload, cs,
+            if (!PackedMovement.TryUnpack(
+                    payload, cs,
                     ref _haveAnchor, ref _anchorCellX, ref _anchorCellY,
                     ref _baseSnap, out snap))
             {
@@ -285,7 +285,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // ordered insert by serverTime
+            // inserimento ordinato per serverTime
             if (_buffer.Count == 0 || snap.serverTime >= _buffer[_buffer.Count - 1].serverTime)
             {
                 _buffer.Add(snap);
@@ -325,6 +325,7 @@ namespace Game.Networking.Adapters
             if (_back <= 0.0)
                 _back = _backTarget;
 
+            // state hash check
             ulong clientHash = ComputeStateHashForSnapshot(snap);
             if (clientHash != serverStateHash)
             {
@@ -341,7 +342,6 @@ namespace Game.Networking.Adapters
                     });
 
                 _telemetry?.Increment($"client.{OwnerClientId}.statehash_mismatch");
-
                 RequestFullSnapshotFromServer(true);
             }
             else
@@ -350,7 +350,8 @@ namespace Game.Networking.Adapters
             }
         }
 
-        // BOOKMARK: REQUEST_FULL_SNAPSHOT_SERVER_RPC
+        // --- Server: invio full snapshot su richiesta ---
+
         [ServerRpc(RequireOwnership = false)]
         void RequestFullSnapshotServerRpc(bool preferNoFec)
         {
@@ -371,6 +372,7 @@ namespace Game.Networking.Adapters
             byte anim = 0;
 
             var snap = new MovementSnapshot(pos, vel, now, seq, anim);
+
             byte[] full = PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
                 0, 0, _chunk ? _chunk.cellSize : 128);
@@ -418,7 +420,6 @@ namespace Game.Networking.Adapters
             _telemetry?.Increment($"client.{OwnerClientId}.full_requested_by_client");
         }
 
-        // BOOKMARK: REQUEST_FULL_SNAPSHOT_FROM_SERVER
         void RequestFullSnapshotFromServer(bool preferNoFec = false)
         {
             double now = Time.realtimeSinceStartup;
@@ -453,7 +454,6 @@ namespace Game.Networking.Adapters
             RequestFullSnapshotServerRpc(preferNoFec);
         }
 
-        // BOOKMARK: NOTE_SUCCESSFUL_SNAPSHOT
         void NoteSuccessfulSnapshotDelivery()
         {
             _fullRequestWindowCount = 0;
@@ -461,7 +461,8 @@ namespace Game.Networking.Adapters
             _fullRequestWindowStart = Time.realtimeSinceStartup;
         }
 
-        // BOOKMARK: STATE_HASH_UTILS
+        // --- State hash utils ---
+
         static ulong ComputeStateHashForSnapshot(MovementSnapshot s)
         {
             Span<byte> buf = stackalloc byte[8 * 6];
@@ -488,7 +489,8 @@ namespace Game.Networking.Adapters
             }
         }
 
-        // BOOKMARK: BUILD_FEC_SHARDS
+        // --- FEC shard building ---
+
         List<byte[]> BuildFecShards(byte[] payload, int shardSize, int parityCount)
         {
             var shards = new List<byte[]>();
@@ -499,7 +501,7 @@ namespace Game.Networking.Adapters
             int dataShards = (payload.Length + effectiveShardSize - 1) / effectiveShardSize;
             int totalShards = dataShards + parityCount;
 
-            // Data shards
+            // data shards
             for (int i = 0; i < dataShards; i++)
             {
                 int start = i * effectiveShardSize;
@@ -514,7 +516,7 @@ namespace Game.Networking.Adapters
                 shards.Add(s);
             }
 
-            // Parity shards (XOR)
+            // parity shards (XOR)
             for (int p = 0; p < parityCount; p++)
             {
                 int maxLen = effectiveShardSize;
@@ -546,7 +548,8 @@ namespace Game.Networking.Adapters
             return shards;
         }
 
-        // BOOKMARK: INTERP_HELPERS
+        // --- Helpers interpolazione buffer remoti ---
+
         static Vector3 Hermite(Vector3 p0, Vector3 v0, Vector3 p1, Vector3 v1, float t)
         {
             float t2 = t * t;

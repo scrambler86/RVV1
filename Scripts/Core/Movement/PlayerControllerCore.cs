@@ -109,17 +109,16 @@ public class PlayerControllerCore : MonoBehaviour
 
         _canRotateVisualRoot = (visualRoot != transform);
 
-        // snap iniziale a terra: usa MovePosition/Warp per non rompere interpolazione
+        // Snap iniziale a terra
         Vector3 p = transform.position;
         p = SnapToGround(p);
 
-        // prefer MovePosition in Awake if physics exists; Warp if available on agent
         if (_agent)
         {
             _agent.Warp(p);
             _agent.nextPosition = p;
         }
-        // use MovePosition to set initial solver state (safe)
+
         _rb.MovePosition(p);
 
         _lastMoveDir = Vector3.zero;
@@ -131,6 +130,7 @@ public class PlayerControllerCore : MonoBehaviour
         if (!mainCamera) mainCamera = Camera.main;
         if (!terrain) terrain = Terrain.activeTerrain;
 
+        // Toggle run con Shift
         if (_allowInput &&
             (Input.GetKeyDown(KeyCode.LeftShift) || Input.GetKeyDown(KeyCode.RightShift)))
         {
@@ -154,6 +154,7 @@ public class PlayerControllerCore : MonoBehaviour
 
         _ctm?.SyncAgentToTransform();
 
+        // Input WASD
         float hz = Input.GetAxisRaw("Horizontal");
         float vt = Input.GetAxisRaw("Vertical");
         if (Mathf.Abs(hz) < 0.2f) hz = 0f;
@@ -169,6 +170,7 @@ public class PlayerControllerCore : MonoBehaviour
             Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.LeftArrow) ||
             Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.RightArrow);
 
+        // Se passo a WASD, interrompo path click-to-move
         if (wasdPressed && _ctm != null && _ctm.HasPath)
             _ctm.CancelPath();
 
@@ -218,7 +220,7 @@ public class PlayerControllerCore : MonoBehaviour
 
         _lastMoveDir = desiredDir;
 
-        // integrazione movimento
+        // Integrazione movimento
         Vector3 step = desiredDir * curSpeed * Time.fixedDeltaTime;
         Vector3 target = _rb.position + new Vector3(step.x, 0f, step.z);
         target = SnapToGround(target);
@@ -243,7 +245,6 @@ public class PlayerControllerCore : MonoBehaviour
         _lastPlanarSpeed = planarSpeed;
         float animSpeed = Mathf.Min(planarSpeed, curSpeed);
 
-        // Movimento fisico: usare MovePosition sempre
         _rb.MovePosition(target);
         if (_agent)
             _agent.nextPosition = target;
@@ -296,7 +297,7 @@ public class PlayerControllerCore : MonoBehaviour
         else
             return p;
 
-        // maggiore tolleranza per evitare micro-snap continui
+        // tolleranza leggermente più alta per evitare micro jitter
         if (Mathf.Abs(targetY - p.y) < 0.03f)
             return p;
 
@@ -350,7 +351,8 @@ public class PlayerControllerCore : MonoBehaviour
         if (_ctm != null)
         {
             _ctm.CancelPath();
-            if (_agent) _agent.nextPosition = _rb.position;
+            if (_agent)
+                _agent.nextPosition = _rb.position;
         }
     }
 
