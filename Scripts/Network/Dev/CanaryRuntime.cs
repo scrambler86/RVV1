@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 using FishNet;
@@ -36,15 +36,25 @@ public class CanaryRuntime : NetworkBehaviour
     private void Awake()
     {
         _canaryPayload = BuildCanary(canaryLen);
+        if (verboseLogs)
+            Debug.Log($"[Canary] Awake. Built payload len={_canaryPayload.Length}");
     }
 
     public override void OnStartServer()
     {
         base.OnStartServer();
-        if (!enabledRuntime)
-            return;
 
-        if (autoRun)
+        if (!enabledRuntime)
+        {
+            if (verboseLogs)
+                Debug.Log("[Canary] OnStartServer: runtime disabled, non faccio nulla.");
+            return;
+        }
+
+        if (verboseLogs)
+            Debug.Log($"[Canary] OnStartServer: IsServerInitialized={IsServerInitialized}, autoRun={autoRun}");
+
+        if (autoRun && IsServerInitialized)
             InvokeRepeating(nameof(BroadcastOnce), 1f, intervalSec);
     }
 
@@ -67,18 +77,55 @@ public class CanaryRuntime : NetworkBehaviour
 
     public void BroadcastOnce(bool shards)
     {
-        if (!IsServerInitialized || !enabledRuntime)
+        if (!enabledRuntime)
+        {
+            if (verboseLogs)
+                Debug.Log("[Canary] BroadcastOnce: runtime disabled.");
             return;
+        }
 
-        var dict = InstanceFinder.ServerManager?.Clients;
-        if (dict == null || dict.Count == 0)
+        if (!IsServerInitialized)
+        {
+            if (verboseLogs)
+                Debug.Log("[Canary] BroadcastOnce: IsServerInitialized = false. Sei sicuro di essere Host/Server?");
             return;
+        }
+
+        var sm = InstanceFinder.ServerManager;
+        if (sm == null)
+        {
+            if (verboseLogs)
+                Debug.LogWarning("[Canary] BroadcastOnce: ServerManager nullo.");
+            return;
+        }
+
+        var dict = sm.Clients;
+        if (dict == null)
+        {
+            if (verboseLogs)
+                Debug.LogWarning("[Canary] BroadcastOnce: Clients dict nullo.");
+            return;
+        }
+
+        if (dict.Count == 0)
+        {
+            if (verboseLogs)
+                Debug.Log("[Canary] BroadcastOnce: nessun client connesso (Host incluso).");
+            return;
+        }
+
+        if (verboseLogs)
+            Debug.Log($"[Canary] BroadcastOnce: sending to {dict.Count} client(s). shards={shards}");
 
         foreach (var kv in dict)
         {
             var conn = kv.Value;
             if (conn == null)
+            {
+                if (verboseLogs)
+                    Debug.LogWarning("[Canary] BroadcastOnce: connection null, skip.");
                 continue;
+            }
 
             SendCanaryTo(conn, shards);
         }
@@ -86,20 +133,38 @@ public class CanaryRuntime : NetworkBehaviour
 
     public void SendCanaryTo(NetworkConnection conn, bool shards)
     {
-        if (!IsServerInitialized || conn == null || _canaryPayload == null)
+        if (!IsServerInitialized)
+        {
+            if (verboseLogs)
+                Debug.Log("[Canary] SendCanaryTo: IsServerInitialized=false, skip.");
             return;
+        }
+
+        if (conn == null)
+        {
+            if (verboseLogs)
+                Debug.LogWarning("[Canary] SendCanaryTo: conn null, skip.");
+            return;
+        }
+
+        if (_canaryPayload == null)
+        {
+            if (verboseLogs)
+                Debug.LogWarning("[Canary] SendCanaryTo: _canaryPayload null, skip.");
+            return;
+        }
 
         var driver = FindObjectOfType<PlayerNetworkDriverFishNet>();
         if (driver == null)
         {
             if (verboseLogs)
-                Debug.LogWarning("[Canary] PlayerNetworkDriverFishNet non trovato, annullo invio.");
+                Debug.LogWarning("[Canary] PlayerNetworkDriverFishNet non trovato in scena, annullo invio.");
             return;
         }
 
         if (shards && parity > 0)
         {
-            // Shard canary con FEC; marcati come CANARY così il driver non li interpreta come movement.
+            // Usa FEC per shard canary; marca come CANARY per evitare decoding come movimento.
             List<byte[]> sList = FecReedSolomon.BuildShards(_canaryPayload, shardSize, parity);
 
             ulong fullHash = EnvelopeUtil.ComputeHash64(_canaryPayload);
@@ -119,13 +184,12 @@ public class CanaryRuntime : NetworkBehaviour
                     // 0x08 = CANARY, 0x04 = shard.
                     flags = 0x08 | 0x04
                 };
-
                 var packed = EnvelopeUtil.Pack(env, shardBytes);
                 driver.SendPackedShardToClient(conn, packed);
             }
 
             if (verboseLogs)
-                Debug.Log($"[Canary] SHARDS sent to {conn.ClientId}, totalShards={sList.Count} fullLen={fullLen}");
+                Debug.Log($"[Canary] SHARDS sent to conn={conn.ClientId}, totalShards={sList.Count} fullLen={fullLen}");
         }
         else
         {
@@ -139,12 +203,11 @@ public class CanaryRuntime : NetworkBehaviour
                 // 0x08 = CANARY, 0x01 = snapshot/full.
                 flags = 0x08 | 0x01
             };
-
             var packed = EnvelopeUtil.Pack(env, _canaryPayload);
             driver.SendPackedSnapshotToClient(conn, packed, env.payloadHash);
 
             if (verboseLogs)
-                Debug.Log($"[Canary] SNAPSHOT sent to {conn.ClientId}, len={_canaryPayload.Length}");
+                Debug.Log($"[Canary] SNAPSHOT sent to conn={conn.ClientId}, len={_canaryPayload.Length}");
         }
     }
 }
