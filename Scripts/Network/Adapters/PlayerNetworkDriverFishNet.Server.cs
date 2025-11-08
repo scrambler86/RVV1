@@ -51,12 +51,22 @@ namespace Game.Networking.Adapters
             float speed = running ? _core.speed * _core.runMultiplier : _core.speed;
             Vector3 step = planar * speed * dt;
 
-            Vector3 result = startPos + step;
+            Vector3 result = startPos + new Vector3(step.x, 0f, step.z);
 
-            if (ignoreNetworkY)
-                result.y = startPos.y;
-            else
+            bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
+            if (hasVerticalInput)
+            {
                 result.y = startPos.y + dir.y * speed * dt;
+            }
+            else if (_core != null)
+            {
+                // Proiezione a terra lato server per evitare drift verticale
+                result.y = _core.SampleGroundY(result);
+            }
+            else
+            {
+                result.y = startPos.y;
+            }
 
             return result;
         }
@@ -217,13 +227,26 @@ namespace Game.Networking.Adapters
                 _telemetry?.Increment("anti_cheat.soft_clamps");
             }
 
-            // ---------- NavMesh + velocità ----------
+            // ---------- NavMesh + verticale ----------
+            bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
             Vector3 finalPos = ok ? serverIntegratedPos : predictedPos;
+
+            if (!hasVerticalInput && _core != null)
+            {
+                float sampleY = _core.SampleGroundY(finalPos);
+                finalPos.y = sampleY;
+            }
 
             if (validateNavMesh &&
                 NavMesh.SamplePosition(finalPos, out var nh, navMeshMaxSampleDist, NavMesh.AllAreas))
             {
                 finalPos = nh.position;
+
+                if (!hasVerticalInput && _core != null)
+                {
+                    float sampleY = _core.SampleGroundY(finalPos);
+                    finalPos.y = sampleY;
+                }
             }
 
             Vector3 deltaPos = finalPos - _serverLastPos;

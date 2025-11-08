@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using FishNet;
@@ -41,7 +41,8 @@ public class CanaryRuntime : NetworkBehaviour
     public override void OnStartServer()
     {
         base.OnStartServer();
-        if (!enabledRuntime) return;
+        if (!enabledRuntime)
+            return;
 
         if (autoRun)
             InvokeRepeating(nameof(BroadcastOnce), 1f, intervalSec);
@@ -98,7 +99,7 @@ public class CanaryRuntime : NetworkBehaviour
 
         if (shards && parity > 0)
         {
-            // Usa FEC per shard canary; marca come CANARY per evitare decoding come movimento.
+            // Shard canary con FEC; marcati come CANARY così il driver non li interpreta come movement.
             List<byte[]> sList = FecReedSolomon.BuildShards(_canaryPayload, shardSize, parity);
 
             ulong fullHash = EnvelopeUtil.ComputeHash64(_canaryPayload);
@@ -115,9 +116,10 @@ public class CanaryRuntime : NetworkBehaviour
                     seq = seq,
                     payloadLen = fullLen,
                     payloadHash = fullHash,
-                    // 0x08 = CANARY flag (usato dal driver), 0x04 opzionale per tipo shard.
+                    // 0x08 = CANARY, 0x04 = shard.
                     flags = 0x08 | 0x04
                 };
+
                 var packed = EnvelopeUtil.Pack(env, shardBytes);
                 driver.SendPackedShardToClient(conn, packed);
             }
@@ -137,6 +139,7 @@ public class CanaryRuntime : NetworkBehaviour
                 // 0x08 = CANARY, 0x01 = snapshot/full.
                 flags = 0x08 | 0x01
             };
+
             var packed = EnvelopeUtil.Pack(env, _canaryPayload);
             driver.SendPackedSnapshotToClient(conn, packed, env.payloadHash);
 

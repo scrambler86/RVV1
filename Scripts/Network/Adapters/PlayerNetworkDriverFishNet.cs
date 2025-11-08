@@ -230,10 +230,10 @@ namespace Game.Networking.Adapters
         private readonly Dictionary<NetworkConnection, double> _fecSuppressedUntil = new();
         private const double FEC_DISABLE_DURATION_SECONDS = 10.0;
 
-        // Diagnostics: map incoming envelope messageId -> server-provided payloadHash / payloadLen
+        // Diagnostics: mappa envelope id -> (hash,len) server
         private readonly Dictionary<uint, (ulong hash, int len)> _incomingEnvelopeMeta = new();
 
-        // Track messageIds flagged as CANARY so we don't try to decode them as movement
+        // MessageIds CANARY (non tentar decodifica movement)
         private readonly HashSet<uint> _canaryMessageIds = new();
 
         // ------- CRC reporting helper (rate-limited, non-blocking) -------
@@ -340,7 +340,6 @@ namespace Game.Networking.Adapters
         }
 
         // ------- PUBLIC WRAPPERS (for external hooks/helpers) -------
-
         public void HandlePackedShardPublic(byte[] shard)
         {
             HandlePackedShard(shard);

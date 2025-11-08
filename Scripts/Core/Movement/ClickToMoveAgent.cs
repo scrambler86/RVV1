@@ -200,7 +200,6 @@ namespace Game.Networking.Adapters
                 {
                     if (t.gameObject.layer == _uiLayer)
                         return true;
-
                     t = t.parent;
                 }
             }
@@ -234,6 +233,7 @@ namespace Game.Networking.Adapters
         {
             if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
                 return Vector3.zero;
+
             return _agent.desiredVelocity;
         }
 
@@ -241,6 +241,7 @@ namespace Game.Networking.Adapters
         {
             if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
                 return Mathf.Infinity;
+
             return _agent.remainingDistance;
         }
 
@@ -250,6 +251,7 @@ namespace Game.Networking.Adapters
         {
             if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
                 return transform.position;
+
             return _agent.steeringTarget;
         }
 

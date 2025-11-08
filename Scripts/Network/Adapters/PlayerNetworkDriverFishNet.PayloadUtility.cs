@@ -19,7 +19,6 @@ namespace Game.Networking.Adapters
         }
 
         // --- Gestione shard FEC / riassemblaggio ---
-
         void HandlePackedShard(byte[] shard)
         {
             uint messageId = 0;
@@ -64,7 +63,7 @@ namespace Game.Networking.Adapters
             if (dataLen < 0 || innerShard.Length < 8 + dataLen)
                 return;
 
-            byte[] data = new byte[dataLen];
+            var data = new byte[dataLen];
             Array.Copy(innerShard, 8, data, 0, dataLen);
 
             if (messageId == 0)
@@ -85,7 +84,7 @@ namespace Game.Networking.Adapters
 
             _telemetry?.Increment("pack.shards_received");
 
-            // Hai già tutti i data shards?
+            // Check se tutti i data shards sono presenti, altrimenti prova recovery semplice.
             bool all = true;
             for (int i = 0; i < list.Count; ++i)
             {
@@ -114,11 +113,11 @@ namespace Game.Networking.Adapters
                     }
                 }
 
-                // Se manca esattamente 1 data shard e abbiamo parità, prova XOR-recovery
+                // Se manca esattamente 1 data shard e abbiamo parità, prova XOR recovery.
                 if (missingCount == 1 && parityCount > 0)
                 {
                     int shardPadSize = fecShardSize;
-                    byte[][] padded = new byte[totalShards][];
+                    var padded = new byte[totalShards][];
 
                     for (int i = 0; i < totalShards; i++)
                     {
@@ -136,7 +135,7 @@ namespace Game.Networking.Adapters
                         }
                     }
 
-                    byte[] recovered = new byte[shardPadSize];
+                    var recovered = new byte[shardPadSize];
 
                     for (int s = 0; s < totalShards; s++)
                     {
@@ -148,11 +147,11 @@ namespace Game.Networking.Adapters
                     int recoveredDataLen = shardPadSize;
                     if (missingDataIdx == dataShards - 1)
                     {
-                        // ultimo shard dati, lunghezza può essere minore
+                        // Ultimo shard dati: può essere più corto.
                         recoveredDataLen = Math.Min(recoveredDataLen, shardPadSize);
                     }
 
-                    byte[] recData = new byte[recoveredDataLen];
+                    var recData = new byte[recoveredDataLen];
                     Array.Copy(recovered, 0, recData, 0, recoveredDataLen);
 
                     list[missingDataIdx] = new ShardInfo
@@ -167,12 +166,12 @@ namespace Game.Networking.Adapters
                 }
                 else
                 {
-                    // Non abbastanza info per ricostruire → aspetta altri shard
+                    // Non abbastanza info per ricostruire, attendi altri shard.
                     return;
                 }
             }
 
-            // Riassembla payload
+            // Riassembla payload dai data shards.
             int totalShardsFinal = _shardRegistry.GetTotalCount(messageId);
             int parityCnt = fecParityShards;
             int dataCount = Math.Max(1, totalShardsFinal - parityCnt);
@@ -188,7 +187,7 @@ namespace Game.Networking.Adapters
             }
 
             int payloadLength = (int)payloadLengthLong;
-            byte[] payload = new byte[payloadLength];
+            var payload = new byte[payloadLength];
 
             int writePos = 0;
             for (int i = 0; i < dataCount; i++)
@@ -462,7 +461,6 @@ namespace Game.Networking.Adapters
         }
 
         // --- State hash utils ---
-
         static ulong ComputeStateHashForSnapshot(MovementSnapshot s)
         {
             Span<byte> buf = stackalloc byte[8 * 6];
@@ -490,7 +488,6 @@ namespace Game.Networking.Adapters
         }
 
         // --- FEC shard building ---
-
         List<byte[]> BuildFecShards(byte[] payload, int shardSize, int parityCount)
         {
             var shards = new List<byte[]>();
@@ -507,7 +504,7 @@ namespace Game.Networking.Adapters
                 int start = i * effectiveShardSize;
                 int len = Math.Min(effectiveShardSize, payload.Length - start);
 
-                byte[] s = new byte[2 + 2 + 4 + len];
+                var s = new byte[2 + 2 + 4 + len];
                 Array.Copy(BitConverter.GetBytes((ushort)totalShards), 0, s, 0, 2);
                 Array.Copy(BitConverter.GetBytes((ushort)i), 0, s, 2, 2);
                 Array.Copy(BitConverter.GetBytes((uint)len), 0, s, 4, 4);
@@ -520,7 +517,7 @@ namespace Game.Networking.Adapters
             for (int p = 0; p < parityCount; p++)
             {
                 int maxLen = effectiveShardSize;
-                byte[] parityPayload = new byte[maxLen];
+                var parityPayload = new byte[maxLen];
                 Array.Clear(parityPayload, 0, maxLen);
 
                 for (int i = 0; i < dataShards; i++)
@@ -536,7 +533,7 @@ namespace Game.Networking.Adapters
                     }
                 }
 
-                byte[] parityShard = new byte[2 + 2 + 4 + maxLen];
+                var parityShard = new byte[2 + 2 + 4 + maxLen];
                 Array.Copy(BitConverter.GetBytes((ushort)totalShards), 0, parityShard, 0, 2);
                 Array.Copy(BitConverter.GetBytes((ushort)(dataShards + p)), 0, parityShard, 2, 2);
                 Array.Copy(BitConverter.GetBytes((uint)maxLen), 0, parityShard, 4, 4);
@@ -549,7 +546,6 @@ namespace Game.Networking.Adapters
         }
 
         // --- Helpers interpolazione buffer remoti ---
-
         static Vector3 Hermite(Vector3 p0, Vector3 v0, Vector3 p1, Vector3 v1, float t)
         {
             float t2 = t * t;

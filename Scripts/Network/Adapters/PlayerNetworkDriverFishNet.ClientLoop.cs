@@ -30,8 +30,8 @@ namespace Game.Networking.Adapters
                 TickServerResendLoop();
         }
 
-        // Mantiene vivo il buffer shard (timeout, cleanup).
-        // Implementazione effettiva in un altro partial (PayloadUtility): CheckShardBufferTimeouts().
+        // Mantiene vivo il buffer shard (timeout + cleanup)
+        // Implementazione effettiva in altro partial: CheckShardBufferTimeouts().
         void ProcessShardBufferTimeouts()
         {
             CheckShardBufferTimeouts();
@@ -67,7 +67,7 @@ namespace Game.Networking.Adapters
             double now = _netTime.Now();
             _serverRetryScratch.Clear();
 
-            // Verifica payload completi in attesa di ACK
+            // Payload completi in attesa di ACK
             foreach (var kv in _lastFullPayload)
             {
                 var conn = kv.Key;
@@ -85,7 +85,7 @@ namespace Game.Networking.Adapters
                     _serverRetryScratch.Add(conn);
             }
 
-            // Verifica shard FEC in attesa di ACK
+            // Shard FEC in attesa di ACK
             foreach (var kv in _lastFullShards)
             {
                 var conn = kv.Key;
@@ -106,13 +106,16 @@ namespace Game.Networking.Adapters
             // Retry effettivo
             foreach (var conn in _serverRetryScratch)
             {
-                if (_lastFullShards.TryGetValue(conn, out var shards) && shards != null && shards.Count > 0)
+                if (_lastFullShards.TryGetValue(conn, out var shards) &&
+                    shards != null && shards.Count > 0)
                 {
                     byte[] lastFull = null;
                     if (_lastFullPayload.TryGetValue(conn, out var payloadBytes))
                         lastFull = payloadBytes;
 
-                    ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
+                    ulong fullHash = (lastFull != null)
+                        ? EnvelopeUtil.ComputeHash64(lastFull)
+                        : 0;
                     int fullLen = (lastFull != null) ? lastFull.Length : 0;
 
                     uint messageId = _nextOutgoingMessageId++;
@@ -126,7 +129,8 @@ namespace Game.Networking.Adapters
                     foreach (var shard in shards)
                     {
                         if (verboseNetLog)
-                            Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
+                            Debug.Log(
+                                $"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
 
                         byte[] envelopeBytes =
                             CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
@@ -161,8 +165,9 @@ namespace Game.Networking.Adapters
             float lastPlanarSpeed = (_core != null) ? _core.DebugPlanarSpeed : 0f;
             float distToTarget = Vector3.Distance(_rb.position, _elasticTargetPos);
 
-            // Evita micro jitter quando il player è praticamente fermo vicino al target
-            if (lastPlanarSpeed < 0.02f && distToTarget < Mathf.Max(0.06f, correctionMinVisible))
+            // Evita micro jitter quando il player è praticamente fermo vicino al target.
+            if (lastPlanarSpeed < 0.02f &&
+                distToTarget < Mathf.Max(0.06f, correctionMinVisible))
             {
                 _isApplyingElastic = false;
                 _elasticElapsed = 0f;
@@ -194,7 +199,8 @@ namespace Game.Networking.Adapters
 
             _elasticCurrentMultiplier *= correctionDecay;
 
-            if (t >= 1f || Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
+            if (t >= 1f ||
+                Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
             {
                 _isApplyingElastic = false;
                 _elasticElapsed = 0f;
@@ -215,7 +221,7 @@ namespace Game.Networking.Adapters
             Vector3 target = _pendingHardSnap;
             float distance = Vector3.Distance(current, target);
 
-            // Se vicino, snap morbido con MovePosition
+            // Se vicino, snap morbido con MovePosition.
             if (distance <= 0.15f)
             {
                 _rb.MovePosition(target);
@@ -224,7 +230,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // Se molto lontano, warp sicuro una volta
+            // Se molto lontano, warp sicuro una volta.
             if (distance > hardSnapDist * 1.5f)
             {
                 bool prevKinematic = _rb.isKinematic;
@@ -237,7 +243,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // Altrimenti avvicina con MoveTowards
+            // Altrimenti avvicina con MoveTowards.
             Vector3 next = Vector3.MoveTowards(
                 current, target,
                 maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
@@ -263,7 +269,7 @@ namespace Game.Networking.Adapters
             Vector3 toTarget = _reconcileTarget - current;
             float distance = toTarget.magnitude;
 
-            // Se quasi allineato e fermo, termina
+            // Se quasi allineato e fermo, termina.
             if (lastPlanarSpeed < 0.02f &&
                 distance < Mathf.Max(0.06f, correctionMinVisible))
             {
@@ -277,7 +283,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // Se molto distante → hard snap (con rate limit)
+            // Se molto distante → hard snap (con rate limit).
             if (distance > hardSnapDist)
             {
                 double now = _netTime.Now();
@@ -295,17 +301,18 @@ namespace Game.Networking.Adapters
                     float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime;
                     Vector3 step = Vector3.ClampMagnitude(toTarget, maxAllowed);
                     Vector3 next = current + step;
-                    next = Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
+                    Vector3 smoothedRateLimited =
+                        Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
 
-                    _rb.MovePosition(next);
-                    if (_agent) _agent.nextPosition = next;
+                    _rb.MovePosition(smoothedRateLimited);
+                    if (_agent) _agent.nextPosition = smoothedRateLimited;
                     _telemetry?.Increment("reconcile.rate_limited_snaps");
                 }
 
                 return;
             }
 
-            // Smooth reconcile
+            // Smooth reconcile.
             float alpha = 1f - Mathf.Exp(-reconcileRate * Time.fixedDeltaTime * 0.66f);
             float maxAllowedFinal = maxCorrectionSpeed * Time.fixedDeltaTime;
 
@@ -409,7 +416,10 @@ namespace Game.Networking.Adapters
                 target.y = transform.position.y;
 
             Transform vr = _core ? _core.visualRoot : null;
-            Vector3 current = (remoteMoveVisualOnly && vr) ? vr.position : _rb.position;
+            Vector3 current = (remoteMoveVisualOnly && vr)
+                ? vr.position
+                : _rb.position;
+
             float k = 1f - Mathf.Exp(-remoteVisualLerpSpeed * Time.deltaTime);
             Vector3 smoothed = Vector3.Lerp(current, target, k);
 
@@ -430,10 +440,12 @@ namespace Game.Networking.Adapters
             {
                 Vector3 dir = moveVec;
                 dir.y = 0f;
-                if (dir.sqrMagnitude > 0.0004f && _remoteDisplaySpeed > 0.5f)
+                if (dir.sqrMagnitude > 0.0004f &&
+                    _remoteDisplaySpeed > 0.5f)
                 {
                     Quaternion face = Quaternion.LookRotation(dir.normalized);
-                    vr.rotation = Quaternion.Slerp(vr.rotation, face, Time.deltaTime * 6f);
+                    vr.rotation = Quaternion.Slerp(
+                        vr.rotation, face, Time.deltaTime * 6f);
                     vr.rotation = Quaternion.Euler(0f, vr.eulerAngles.y, 0f);
                 }
             }
@@ -501,7 +513,8 @@ namespace Game.Networking.Adapters
             {
                 if (sc++ >= 6)
                     break;
-                sample.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
+                sample.Add(
+                    $"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
             }
 
             if (sample.Count > 0)
@@ -553,7 +566,8 @@ namespace Game.Networking.Adapters
                     { "duration_s", _elasticDuration }
                 });
 
-            _telemetry?.Increment($"client.{OwnerClientId}.elastic_started");
+            _telemetry?.Increment(
+                $"client.{OwnerClientId}.elastic_started");
         }
     }
 }
