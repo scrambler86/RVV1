@@ -11,8 +11,7 @@ namespace Game.Networking.Adapters
     {
         [Header("Camera input")]
         public Camera cam;
-        // 0 = LMB, 1 = RMB
-        public int clickButton = 1;
+        public int clickButton = 1; // 0 = LMB, 1 = RMB
 
         [Header("NavMesh sampling")]
         public float maxSampleDist = 12f;
@@ -45,7 +44,11 @@ namespace Game.Networking.Adapters
 
         private bool _uiConsumeUntilUp;
 
-        public bool HasPath => _agent && _agent.hasPath && !_agent.isStopped;
+        public bool HasPath => _agent &&
+                               _agent.enabled &&
+                               _agent.isOnNavMesh &&
+                               _agent.hasPath &&
+                               !_agent.isStopped;
 
         void Awake()
         {
@@ -154,6 +157,10 @@ namespace Game.Networking.Adapters
                 if (Vector3.Distance(transform.position, nh.position) <= _agent.stoppingDistance + 0.05f)
                     return;
 
+                // Agente non valido? evita chiamate pericolose.
+                if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
+                    return;
+
                 // Imposta path.
                 _agent.isStopped = false;
                 _agent.ResetPath();
@@ -204,43 +211,56 @@ namespace Game.Networking.Adapters
 
         public void CancelPath()
         {
-            if (!_agent)
+            if (_agent == null)
                 return;
+
+            // Durante shutdown o se l'agente non è più su NavMesh, NON chiamare Stop/ResetPath.
+            if (!_agent.enabled || !_agent.isOnNavMesh)
+            {
+                _hasLastGoal = false;
+                return;
+            }
 
             _agent.isStopped = true;
             if (_agent.hasPath)
                 _agent.ResetPath();
 
-            _hasLastGoal = false;
             _agent.nextPosition = transform.position;
+            _hasLastGoal = false;
         }
 
         public Vector3 GetDesiredVelocity()
         {
-            return _agent ? _agent.desiredVelocity : Vector3.zero;
+            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
+                return Vector3.zero;
+            return _agent.desiredVelocity;
         }
 
         public float RemainingDistance()
         {
-            return _agent ? _agent.remainingDistance : Mathf.Infinity;
+            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
+                return Mathf.Infinity;
+            return _agent.remainingDistance;
         }
 
         public float StoppingDistance => _agent ? _agent.stoppingDistance : 0.15f;
 
         public Vector3 SteeringTarget()
         {
-            return _agent ? _agent.steeringTarget : transform.position;
+            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
+                return transform.position;
+            return _agent.steeringTarget;
         }
 
         public void SyncAgentToTransform()
         {
-            if (_agent)
+            if (_agent && _agent.enabled && _agent.isOnNavMesh)
                 _agent.nextPosition = transform.position;
         }
 
         public Vector3[] GetPathCorners()
         {
-            if (!_agent || !_agent.hasPath)
+            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh || !_agent.hasPath)
                 return System.Array.Empty<Vector3>();
 
             var p = _agent.path;

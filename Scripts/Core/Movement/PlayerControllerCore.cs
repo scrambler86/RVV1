@@ -38,7 +38,7 @@ public class PlayerControllerCore : MonoBehaviour
 
     [Header("State / Gating")]
     public bool canMove = true;
-    public bool useDeterministicPlanar = false; // hook futuro
+    public bool useDeterministicPlanar = false;
 
     Rigidbody _rb;
     Collider _col;
@@ -54,7 +54,6 @@ public class PlayerControllerCore : MonoBehaviour
     float _lastPlanarSpeed;
     RaycastHit[] _groundBuffer;
 
-    // evita di ruotare il root (che trascina la camera) se non abbiamo un visual child separato
     bool _canRotateVisualRoot = true;
 
     public bool IsRunning => _runToggle;
@@ -78,6 +77,7 @@ public class PlayerControllerCore : MonoBehaviour
         if (_anim) _anim.applyRootMotion = false;
         CacheAnimParams();
 
+        // physics sane defaults
         _rb.isKinematic = false;
         _rb.detectCollisions = true;
         _rb.interpolation = RigidbodyInterpolation.Interpolate;
@@ -107,18 +107,20 @@ public class PlayerControllerCore : MonoBehaviour
         if (!visualRoot)
             visualRoot = transform;
 
-        // protezione anti "mi gira tutta la mappa"
         _canRotateVisualRoot = (visualRoot != transform);
 
-        // snap iniziale a terra
+        // snap iniziale a terra: usa MovePosition/Warp per non rompere interpolazione
         Vector3 p = transform.position;
         p = SnapToGround(p);
-        _rb.position = p;
+
+        // prefer MovePosition in Awake if physics exists; Warp if available on agent
         if (_agent)
         {
             _agent.Warp(p);
             _agent.nextPosition = p;
         }
+        // use MovePosition to set initial solver state (safe)
+        _rb.MovePosition(p);
 
         _lastMoveDir = Vector3.zero;
         _lastPlanarSpeed = 0f;
@@ -129,7 +131,6 @@ public class PlayerControllerCore : MonoBehaviour
         if (!mainCamera) mainCamera = Camera.main;
         if (!terrain) terrain = Terrain.activeTerrain;
 
-        // toggle run con Shift
         if (_allowInput &&
             (Input.GetKeyDown(KeyCode.LeftShift) || Input.GetKeyDown(KeyCode.RightShift)))
         {
@@ -153,7 +154,6 @@ public class PlayerControllerCore : MonoBehaviour
 
         _ctm?.SyncAgentToTransform();
 
-        // input WASD
         float hz = Input.GetAxisRaw("Horizontal");
         float vt = Input.GetAxisRaw("Vertical");
         if (Mathf.Abs(hz) < 0.2f) hz = 0f;
@@ -169,7 +169,6 @@ public class PlayerControllerCore : MonoBehaviour
             Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.LeftArrow) ||
             Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.RightArrow);
 
-        // se passo a WASD, interrompo path click-to-move
         if (wasdPressed && _ctm != null && _ctm.HasPath)
             _ctm.CancelPath();
 
@@ -244,6 +243,7 @@ public class PlayerControllerCore : MonoBehaviour
         _lastPlanarSpeed = planarSpeed;
         float animSpeed = Mathf.Min(planarSpeed, curSpeed);
 
+        // Movimento fisico: usare MovePosition sempre
         _rb.MovePosition(target);
         if (_agent)
             _agent.nextPosition = target;
@@ -296,7 +296,8 @@ public class PlayerControllerCore : MonoBehaviour
         else
             return p;
 
-        if (Mathf.Abs(targetY - p.y) < 0.01f)
+        // maggiore tolleranza per evitare micro-snap continui
+        if (Mathf.Abs(targetY - p.y) < 0.03f)
             return p;
 
         p.y = targetY;
@@ -349,8 +350,7 @@ public class PlayerControllerCore : MonoBehaviour
         if (_ctm != null)
         {
             _ctm.CancelPath();
-            if (_agent)
-                _agent.nextPosition = _rb.position;
+            if (_agent) _agent.nextPosition = _rb.position;
         }
     }
 
