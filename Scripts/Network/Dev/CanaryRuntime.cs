@@ -4,6 +4,7 @@ using UnityEngine;
 using FishNet;
 using FishNet.Object;
 using FishNet.Connection;
+using Game.Networking.Adapters;
 
 // ===== BOOKMARK: CANARY_RUNTIME: HEADER =====
 // CanaryRuntime: invia payload di test (canary) ai client per verificare integrità trasporto
