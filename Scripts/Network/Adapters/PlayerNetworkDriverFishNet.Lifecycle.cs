@@ -1,8 +1,10 @@
 using System;
 using FishNet;
 using FishNet.Connection;
+using FishNet.Object;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -26,7 +28,7 @@ namespace Game.Networking.Adapters
 
             _netTime = provider.ResolveNetTime(this) ?? AdapterServiceLocator.DefaultProvider.ResolveNetTime(this);
             _anti = provider.ResolveAntiCheat(this) ?? _anti;
-            _chunk = provider.ResolveChunkInterest(this) ?? _chunk;
+            _chunk = provider.ResolveChunkManager(this) ?? _chunk;
             _telemetry = provider.ResolveTelemetry(this) ?? DriverTelemetry.Null;
             _clockSync = provider.ResolveClockSync(this) ?? _clockSync;
 
@@ -53,20 +55,13 @@ namespace Game.Networking.Adapters
             RefreshRuntimeServices(true);
         }
 
-        void EnsureOwnerRuntime()
-        {
-            if (_ownerRuntime == null)
-                _ownerRuntime = new PlayerDriverOwnerRuntime();
-        }
-
         public override void OnStartClient()
         {
             base.OnStartClient();
 
             EnsureServices();
-            EnsureOwnerRuntime();
-            _ownerRuntime?.Reset();
 
+            _sendDt = 1f / Mathf.Max(1, sendRateHz);
             _core.SetAllowInput(IsOwner);
 
             if (IsOwner)
@@ -102,8 +97,6 @@ namespace Game.Networking.Adapters
             base.OnStartServer();
 
             EnsureServices();
-            EnsureOwnerRuntime();
-            _ownerRuntime?.Reset(clearInputs: false);
 
             _shuttingDown = false;
             _chunk?.RegisterPlayer(this);
@@ -118,7 +111,6 @@ namespace Game.Networking.Adapters
         {
             _shuttingDown = true;
             _chunk?.UnregisterPlayer(this);
-            _ownerRuntime?.Reset(clearInputs: false);
             base.OnStopServer();
         }
 
@@ -126,14 +118,12 @@ namespace Game.Networking.Adapters
         {
             _shuttingDown = true;
             _core.SetAllowInput(false);
-            _ownerRuntime?.Reset();
             base.OnStopClient();
         }
 
         void OnDisable()
         {
             _shuttingDown = true;
-            _ownerRuntime?.Reset();
 
             if (IsServerInitialized && _chunk != null)
             {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -14,7 +15,7 @@ namespace Game.Networking.Adapters
                                PlayerControllerCore core,
                                Rigidbody rigidbody,
                                ClickToMoveAgent ctm,
-                               IClockSync clockSync,
+                               ClockSyncManager clockSync,
                                INetTime netTime,
                                IDriverTelemetry telemetry,
                                int ownerClientId,
@@ -41,7 +42,7 @@ namespace Game.Networking.Adapters
             public PlayerControllerCore Core { get; }
             public Rigidbody Rigidbody { get; }
             public ClickToMoveAgent ClickToMove { get; }
-            public IClockSync ClockSync { get; }
+            public ClockSyncManager ClockSync { get; }
             public INetTime NetTime { get; }
             public IDriverTelemetry Telemetry { get; }
             public int OwnerClientId { get; }

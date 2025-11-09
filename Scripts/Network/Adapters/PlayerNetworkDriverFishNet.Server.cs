@@ -5,6 +5,7 @@ using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -108,7 +109,6 @@ namespace Game.Networking.Adapters
                 return;
 
             EnsureServices();
-            EnsureOwnerRuntime();
 
             double now = _netTime.Now();
             if (!RateLimitOk(now))
@@ -150,18 +150,10 @@ namespace Game.Networking.Adapters
             bool ok = true;
             if (_anti != null)
             {
-                var context = new AntiCheatInputContext(
-                    this,
-                    seq,
-                    timestamp,
-                    predictedPos,
-                    _serverLastPos,
-                    maxStep,
-                    pathCorners,
-                    running,
-                    dtF);
-
-                ok = _anti.ValidateInput(in context);
+                if (_anti is AntiCheatManager acm)
+                    ok = acm.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running, dtF);
+                else
+                    ok = _anti.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running);
             }
     
             if (!ok)
@@ -186,14 +178,10 @@ namespace Game.Networking.Adapters
     
                 int sampleCount = 0;
                 var inpList = new List<string>();
-                var ownerInputs = _ownerRuntime?.InputBuffer;
-                if (ownerInputs != null)
+                foreach (var inp in _inputBuf)
                 {
-                    foreach (var inp in ownerInputs)
-                    {
-                        if (sampleCount++ >= 6) break;
-                        inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
-                    }
+                    if (sampleCount++ >= 6) break;
+                    inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
                 }
                 if (inpList.Count > 0)
                     tags["input_sample"] = string.Join("|", inpList);
@@ -314,7 +302,7 @@ namespace Game.Networking.Adapters
                         cellY = (short)ccell.y;
                     }
 
-                    cellSize = _chunk.CellSize;
+                    cellSize = _chunk.cellSize;
                 }
 
                 byte[] full = PackedMovement.PackFull(
@@ -452,7 +440,9 @@ namespace Game.Networking.Adapters
                     { "offset_ms", offsetMs }
                 });
     
-            _clockSync?.RecordSample(rttMs, offsetMs);
+            var csm = GetComponentInChildren<ClockSyncManager>();
+            if (csm != null)
+                csm.RecordSample(rttMs, offsetMs);
         }
     
         public double GetEstimatedClientToServerOffsetSeconds()
@@ -509,13 +499,13 @@ namespace Game.Networking.Adapters
         byte[] PackFullForObservers(MovementSnapshot snap)
         {
             short cx = 0, cy = 0;
-            if (_chunk != null && Owner != null && _chunk.TryGetCellOf(Owner, out var cell))
+            if (_chunk && Owner != null && _chunk.TryGetCellOf(Owner, out var cell))
             {
                 cx = (short)cell.x;
                 cy = (short)cell.y;
             }
-
-            int cs = _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE;
+    
+            int cs = _chunk ? _chunk.cellSize : 128;
             return PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime,
                 snap.seq, cx, cy, cs);
@@ -559,7 +549,7 @@ namespace Game.Networking.Adapters
                 payload = PackedMovement.PackDelta(
                     in lastSnapLocal,
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE,
+                    cellX, cellY, _chunk.cellSize,
                     maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
     
                 if (payload == null)
@@ -573,7 +563,7 @@ namespace Game.Networking.Adapters
             {
                 payload = PackedMovement.PackFull(
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE);
+                    cellX, cellY, _chunk.cellSize);
     
                 _sinceKeyframe[conn] = 0;
     
@@ -628,7 +618,7 @@ namespace Game.Networking.Adapters
                 byte[] deltaPayload = PackedMovement.PackDelta(
                     in lastSnapLocal,
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE,
+                    cellX, cellY, _chunk.cellSize,
                     maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
     
                 byte[] deltaEnv = CreateEnvelopeBytes(deltaPayload);

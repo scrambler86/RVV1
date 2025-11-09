@@ -1,5 +1,5 @@
-using System.Linq;
 using UnityEngine;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -7,8 +7,8 @@ namespace Game.Networking.Adapters
     {
         INetTime ResolveNetTime(PlayerNetworkDriverFishNet driver);
         IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver);
-        IChunkInterest ResolveChunkInterest(PlayerNetworkDriverFishNet driver);
-        IClockSync ResolveClockSync(PlayerNetworkDriverFishNet driver);
+        ChunkManager ResolveChunkManager(PlayerNetworkDriverFishNet driver);
+        ClockSyncManager ResolveClockSync(PlayerNetworkDriverFishNet driver);
         IDriverTelemetry ResolveTelemetry(PlayerNetworkDriverFishNet driver);
         ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver);
         IFecService CreateFecService(PlayerNetworkDriverFishNet driver);
@@ -20,55 +20,45 @@ namespace Game.Networking.Adapters
     {
         sealed class DefaultAdapterServiceProvider : IAdapterServiceProvider
         {
-            readonly INetTime _time = new NetTimeAdapter();
+            readonly NetTimeAdapter _time = new();
 
             public INetTime ResolveNetTime(PlayerNetworkDriverFishNet driver) => _time;
 
-            public IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver)
-                => FindInScene<IAntiCheatValidator>();
+            public IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver) =>
+                Object.FindObjectOfType<AntiCheatManager>();
 
-            public IChunkInterest ResolveChunkInterest(PlayerNetworkDriverFishNet driver)
-                => FindInScene<IChunkInterest>();
+            public ChunkManager ResolveChunkManager(PlayerNetworkDriverFishNet driver) =>
+                Object.FindObjectOfType<ChunkManager>();
 
-            public IClockSync ResolveClockSync(PlayerNetworkDriverFishNet driver)
+            public ClockSyncManager ResolveClockSync(PlayerNetworkDriverFishNet driver)
             {
                 if (driver != null)
                 {
-                    var local = driver.GetComponentsInChildren<MonoBehaviour>(includeInactive: true)
-                                       .OfType<IClockSync>()
-                                       .FirstOrDefault();
+                    var local = driver.GetComponentInChildren<ClockSyncManager>();
                     if (local != null)
                         return local;
                 }
 
-                return FindInScene<IClockSync>();
+                return Object.FindObjectOfType<ClockSyncManager>();
             }
 
             public IDriverTelemetry ResolveTelemetry(PlayerNetworkDriverFishNet driver)
-                => FindInScene<IDriverTelemetry>() ?? DriverTelemetry.Null;
-
-            public ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver)
-                => new DefaultSnapshotPackingService();
-
-            public IFecService CreateFecService(PlayerNetworkDriverFishNet driver)
-                => new DefaultFecService();
-
-            public IShardRegistry CreateShardRegistry(PlayerNetworkDriverFishNet driver)
-                => new DefaultShardRegistry();
-
-            public IFullSnapshotRetryManager CreateRetryManager(PlayerNetworkDriverFishNet driver)
-                => new DefaultFullSnapshotRetryManager();
-
-            static TService FindInScene<TService>() where TService : class
             {
-                foreach (var mb in Object.FindObjectsOfType<MonoBehaviour>())
-                {
-                    if (mb is TService svc)
-                        return svc;
-                }
-
-                return null;
+                var telemetry = Object.FindObjectOfType<TelemetryManager>();
+                return DriverTelemetry.Create(telemetry);
             }
+
+            public ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver) =>
+                new DefaultSnapshotPackingService();
+
+            public IFecService CreateFecService(PlayerNetworkDriverFishNet driver) =>
+                new DefaultFecService();
+
+            public IShardRegistry CreateShardRegistry(PlayerNetworkDriverFishNet driver) =>
+                new DefaultShardRegistry();
+
+            public IFullSnapshotRetryManager CreateRetryManager(PlayerNetworkDriverFishNet driver) =>
+                new DefaultFullSnapshotRetryManager();
         }
 
         static readonly IAdapterServiceProvider s_Default = new DefaultAdapterServiceProvider();

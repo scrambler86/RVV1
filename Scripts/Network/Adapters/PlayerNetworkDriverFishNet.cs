@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
+using Game.Network; // ClockSyncManager, AntiCheat, etc.
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -29,7 +30,7 @@ namespace Game.Networking.Adapters
         [SerializeField] private ClickToMoveAgent _ctm;
     
         // ---------- ClockSync helper (client) ----------
-        private IClockSync _clockSync;
+        private ClockSyncManager _clockSync;
     
         [Header("Owner → Server send")]
         [Range(10, 60)] public int sendRateHz = 30;
@@ -130,7 +131,7 @@ namespace Game.Networking.Adapters
 
         private INetTime _netTime;
         private IAntiCheatValidator _anti;
-        private IChunkInterest _chunk;
+        private ChunkManager _chunk;
         private IDriverTelemetry _telemetry = DriverTelemetry.Null;
         private ISnapshotPackingService _packingService;
         private IFecService _fecService;
@@ -138,18 +139,22 @@ namespace Game.Networking.Adapters
         private IFullSnapshotRetryManager _retryManager;
         private bool _servicesResolved;
     
+        private float _sendDt, _sendTimer;
         private uint _lastSeqSent, _lastSeqReceived;
-
+    
         private readonly List<MovementSnapshot> _buffer = new(256);
         private double _emaDelay, _emaJitter, _back, _backTarget;
-
+    
+        private bool _reconcileActive, _doHardSnapNextFixed;
+        private Vector3 _reconcileTarget, _pendingHardSnap;
+    
         private Vector3 _serverLastPos;
         private double _serverLastTime;
-
+    
         private Vector3 _remoteLastRenderPos;
         private float _remoteDisplaySpeed;
-
-        private PlayerDriverOwnerRuntime _ownerRuntime;
+    
+        private readonly Queue<InputState> _inputBuf = new(128);
     
         private readonly HashSet<NetworkConnection> _tmpNear = new();
         private readonly HashSet<NetworkConnection> _tmpMid = new();
@@ -170,6 +175,8 @@ namespace Game.Networking.Adapters
         private double _lastRttMs;
     
         private bool _shuttingDown;
+    
+        private double _lastHardSnapTime = -9999.0;
     
         // ---------- ClockSync fields ----------
         private double _clockOffsetSeconds = 0.0;
@@ -195,6 +202,13 @@ namespace Game.Networking.Adapters
         private const double FULL_REQUEST_WINDOW_SECONDS = 6.0;
         private const int FULL_REQUEST_DISABLE_THRESHOLD = 4;
     
+        // ---------- Elastic correction state (client) ----------
+        private bool _isApplyingElastic = false;
+        private Vector3 _elasticStartPos;
+        private Vector3 _elasticTargetPos;
+        private float _elasticElapsed = 0f;
+        private float _elasticDuration = 0f;
+        private float _elasticCurrentMultiplier = 1f;
     
         // ---------- CRC rate-limited logging ----------
         private int _crcFailCount = 0;
@@ -276,13 +290,7 @@ namespace Game.Networking.Adapters
         {
             TargetPackedShardTo(conn, packedShard);
         }
-
-        uint NextInputSequence()
-        {
-            _lastSeqSent++;
-            return _lastSeqSent;
-        }
-
+    
         byte[] CreateEnvelopeBytes(byte[] payload)
         {
             EnsureServices();

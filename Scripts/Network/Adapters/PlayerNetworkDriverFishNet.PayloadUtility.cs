@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using FishNet.Connection;
@@ -219,7 +219,7 @@ namespace Game.Networking.Adapters
         void HandlePackedPayload(byte[] payload, ulong serverStateHash)
         {
             MovementSnapshot snap;
-            int cs = _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE;
+            int cs = _chunk ? _chunk.cellSize : 128;
     
             if (!PackedMovement.TryUnpack(payload, cs,
                     ref _haveAnchor, ref _anchorCellX, ref _anchorCellY,
@@ -322,7 +322,7 @@ namespace Game.Networking.Adapters
             var snap = new MovementSnapshot(pos, vel, now, seq, anim);
             byte[] full = PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                0, 0, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE);
+                0, 0, _chunk ? _chunk.cellSize : 128);
     
             ulong stateHash = ComputeStateHashForSnapshot(snap);
     

@@ -2,7 +2,6 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.EventSystems;
-using Game.Networking.Adapters;
 
 namespace Game.Networking.Adapters
 {

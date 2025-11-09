@@ -1,4 +1,5 @@
 using UnityEngine;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -10,10 +11,10 @@ namespace Game.Networking.Adapters
         [Header("Overrides")]
         [Tooltip("Optional reference implementing INetTime (MonoBehaviour or ScriptableObject). Leave empty to use the FishNet adapter.")]
         [SerializeField] Object timeSource;
-        [SerializeField] Object antiCheat;
-        [SerializeField] Object chunkInterest;
-        [SerializeField] Object clockSync;
-        [SerializeField] Object telemetry;
+        [SerializeField] AntiCheatManager antiCheat;
+        [SerializeField] ChunkManager chunkManager;
+        [SerializeField] ClockSyncManager clockSync;
+        [SerializeField] TelemetryManager telemetry;
 
         [Header("Lifecycle")]
         [SerializeField] bool registerOnAwake = true;
@@ -39,32 +40,48 @@ namespace Game.Networking.Adapters
 
         public INetTime ResolveNetTime(PlayerNetworkDriverFishNet driver)
         {
-            var resolved = ResolveFromUnityObject<INetTime>(timeSource);
-            return resolved ?? AdapterServiceLocator.DefaultProvider.ResolveNetTime(driver);
+            if (timeSource is INetTime netTime)
+                return netTime;
+
+            if (timeSource is Component comp && comp is INetTime componentTime)
+                return componentTime;
+
+            if (timeSource is ScriptableObject so && so is INetTime timeAsset)
+                return timeAsset;
+
+            return AdapterServiceLocator.DefaultProvider.ResolveNetTime(driver);
         }
 
         public IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver)
         {
-            var resolved = ResolveFromUnityObject<IAntiCheatValidator>(antiCheat);
-            return resolved ?? AdapterServiceLocator.DefaultProvider.ResolveAntiCheat(driver);
+            if (antiCheat != null)
+                return antiCheat;
+
+            return AdapterServiceLocator.DefaultProvider.ResolveAntiCheat(driver);
         }
 
-        public IChunkInterest ResolveChunkInterest(PlayerNetworkDriverFishNet driver)
+        public ChunkManager ResolveChunkManager(PlayerNetworkDriverFishNet driver)
         {
-            var resolved = ResolveFromUnityObject<IChunkInterest>(chunkInterest);
-            return resolved ?? AdapterServiceLocator.DefaultProvider.ResolveChunkInterest(driver);
+            if (chunkManager != null)
+                return chunkManager;
+
+            return AdapterServiceLocator.DefaultProvider.ResolveChunkManager(driver);
         }
 
-        public IClockSync ResolveClockSync(PlayerNetworkDriverFishNet driver)
+        public ClockSyncManager ResolveClockSync(PlayerNetworkDriverFishNet driver)
         {
-            var resolved = ResolveFromUnityObject<IClockSync>(clockSync);
-            return resolved ?? AdapterServiceLocator.DefaultProvider.ResolveClockSync(driver);
+            if (clockSync != null)
+                return clockSync;
+
+            return AdapterServiceLocator.DefaultProvider.ResolveClockSync(driver);
         }
 
         public IDriverTelemetry ResolveTelemetry(PlayerNetworkDriverFishNet driver)
         {
-            var resolved = ResolveFromUnityObject<IDriverTelemetry>(telemetry);
-            return resolved ?? AdapterServiceLocator.DefaultProvider.ResolveTelemetry(driver);
+            if (telemetry != null)
+                return DriverTelemetry.Create(telemetry);
+
+            return AdapterServiceLocator.DefaultProvider.ResolveTelemetry(driver);
         }
 
         public ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver) =>
@@ -78,27 +95,5 @@ namespace Game.Networking.Adapters
 
         public IFullSnapshotRetryManager CreateRetryManager(PlayerNetworkDriverFishNet driver) =>
             AdapterServiceLocator.DefaultProvider.CreateRetryManager(driver);
-
-        static T ResolveFromUnityObject<T>(Object source) where T : class
-        {
-            if (source == null)
-                return null;
-
-            if (source is T direct)
-                return direct;
-
-            if (source is Component component)
-            {
-                if (component is T componentAsT)
-                    return componentAsT;
-
-                return component.GetComponent<T>();
-            }
-
-            if (source is ScriptableObject so && so is T scriptable)
-                return scriptable;
-
-            return null;
-        }
     }
 }
