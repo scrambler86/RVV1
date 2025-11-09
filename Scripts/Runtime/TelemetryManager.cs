@@ -6,8 +6,9 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using UnityEngine;
+using Game.Networking.Adapters;
 
-public class TelemetryManager : MonoBehaviour
+public class TelemetryManager : MonoBehaviour, IDriverTelemetry
 {
     readonly ConcurrentDictionary<string, long> _counters = new();
     readonly ConcurrentDictionary<string, double> _gauges = new();

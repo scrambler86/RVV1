@@ -4,7 +4,10 @@ using UnityEngine;
 
 namespace Game.Networking.Adapters
 {
-    public class NetTimeFishNet : INetTime
+    /// <summary>
+    /// FishNet-backed implementation of INetTime exposed to the generic adapters layer.
+    /// </summary>
+    public class NetTimeAdapter : INetTime
     {
         public double Now()
         {

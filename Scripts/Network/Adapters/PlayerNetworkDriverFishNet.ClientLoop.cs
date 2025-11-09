@@ -1,279 +1,189 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 
-public partial class PlayerNetworkDriverFishNet
+namespace Game.Networking.Adapters
 {
-    // ---------- main loop ----------
-    void FixedUpdate()
+    public partial class PlayerNetworkDriverFishNet
     {
-        if (!IsSpawned || _shuttingDown || s_AppQuitting)
-            return;
-
-        ProcessShardBufferTimeouts();
-
-        if (IsOwner)
-            TickOwnerClient();
-        else
-            TickRemoteClient();
-
-        if (IsServerInitialized)
-            _chunk?.UpdatePlayerChunk(this, _rb.position);
-
-        if (IsServerStarted)
-            TickServerResendLoop();
-    }
-
-    /// <summary>
-    /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
-    /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
-    /// </summary>
-    void TickOwnerClient()
-    {
-        Owner_Send();
-        Owner_ApplyElasticCorrection();
-        Owner_ProcessHardSnap();
-        Owner_ProcessReconciliation();
-    }
-
-    /// <summary>
-    /// Updates interpolation for remote-controlled instances.
-    /// </summary>
-    void TickRemoteClient()
-    {
-        Remote_Update();
-    }
-
-    /// <summary>
-    /// Handles retry scheduling for reliable full snapshots on the server.
-    /// </summary>
-    void TickServerResendLoop()
-    {
-        if (_lastFullPayload.Count == 0 && _lastFullShards.Count == 0)
-            return;
-
-        double now = _netTime.Now();
-        _serverRetryScratch.Clear();
-
-        foreach (var kv in _lastFullPayload)
+        // ---------- main loop ----------
+        void FixedUpdate()
         {
-            var conn = kv.Key;
-            if (conn == null || !conn.IsActive)
-                continue;
+            if (!IsSpawned || _shuttingDown || s_AppQuitting)
+                return;
 
-            if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
-                continue;
+            EnsureServices();
 
-            int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-            if (tries >= FULL_RETRY_MAX)
-                continue;
+            ProcessShardBufferTimeouts();
 
-            if (now - sentAt > FULL_RETRY_SECONDS)
-                _serverRetryScratch.Add(conn);
-        }
-
-        foreach (var kv in _lastFullShards)
-        {
-            var conn = kv.Key;
-            if (conn == null || !conn.IsActive)
-                continue;
-
-            if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
-                continue;
-
-            int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-            if (tries >= FULL_RETRY_MAX)
-                continue;
-
-            if (now - sentAt > FULL_RETRY_SECONDS)
-                _serverRetryScratch.Add(conn);
-        }
-
-        foreach (var conn in _serverRetryScratch)
-        {
-            if (_lastFullShards.TryGetValue(conn, out var shards) && shards != null && shards.Count > 0)
-            {
-                byte[] lastFull = null;
-                if (_lastFullPayload.TryGetValue(conn, out var payloadBytes))
-                    lastFull = payloadBytes;
-
-                ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
-                int fullLen = (lastFull != null) ? lastFull.Length : 0;
-
-                uint messageId = _nextOutgoingMessageId++;
-                if (verboseNetLog)
-                {
-                    Debug.Log(
-                        $"[Server.Debug] Retry sending shards messageId={messageId} " +
-                        $"totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
-                }
-
-                foreach (var shard in shards)
-                {
-                    if (verboseNetLog)
-                        Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
-
-                    byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
-                    TargetPackedShardTo(conn, envelopeBytes);
-                }
-            }
-            else if (_lastFullPayload.TryGetValue(conn, out var payload))
-            {
-                byte[] payloadEnv = CreateEnvelopeBytes(payload);
-                TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(payload));
-            }
-
-            _lastFullSentAt[conn] = _netTime.Now();
-            _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries)
-                ? previousTries + 1
-                : 1;
-
-            _telemetry?.Increment("pack.full_retry");
-        }
-
-        _serverRetryScratch.Clear();
-    }
-
-    /// <summary>
-    /// Applies owner-side elastic correction towards the authoritative server target.
-    /// </summary>
-    void Owner_ApplyElasticCorrection()
-    {
-        if (!_isApplyingElastic)
-            return;
-
-        _elasticElapsed += Time.fixedDeltaTime;
-        float t = Mathf.Clamp01(_elasticElapsed / _elasticDuration);
-        float ease = 1f - Mathf.Pow(1f - t, 3f);
-
-        Vector3 current = _rb.position;
-        Vector3 target = Vector3.Lerp(_elasticStartPos, _elasticTargetPos, ease);
-        float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime * _elasticCurrentMultiplier;
-        Vector3 next = Vector3.MoveTowards(current, target, maxAllowed);
-
-        if (remoteMoveVisualOnly && _core && _core.visualRoot != null)
-            _core.visualRoot.position = next;
-        else
-            _rb.position = next;
-
-        if (_agent)
-            _agent.nextPosition = next;
-
-        float applied = Vector3.Distance(current, next);
-        _telemetry?.Observe($"client.{OwnerClientId}.elastic_applied_cm", applied * 100.0);
-        _telemetry?.Observe($"client.{OwnerClientId}.elastic_progress", ease * 100.0);
-
-        _elasticCurrentMultiplier *= correctionDecay;
-
-        if (t >= 1f || Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
-        {
-            _isApplyingElastic = false;
-            _elasticElapsed = 0f;
-            _elasticCurrentMultiplier = 1f;
-            _telemetry?.Increment($"client.{OwnerClientId}.elastic_completed");
-        }
-    }
-
-    /// <summary>
-    /// Performs pending hard snap correction (owner).
-    /// </summary>
-    void Owner_ProcessHardSnap()
-    {
-        if (!_doHardSnapNextFixed || _isApplyingElastic)
-            return;
-
-        Vector3 current = _rb.position;
-        Vector3 target = _pendingHardSnap;
-        float distance = Vector3.Distance(current, target);
-
-        if (distance > hardSnapDist * 1.1f &&
-            (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
-        {
-            Vector3 next = Vector3.MoveTowards(
-                current, target,
-                maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
-
-            _rb.position = next;
-            if (_agent) _agent.nextPosition = next;
-            if (Vector3.Distance(next, target) < 0.05f)
-                _doHardSnapNextFixed = false;
-        }
-        else
-        {
-            _rb.position = target;
-            if (_agent) _agent.nextPosition = target;
-            _doHardSnapNextFixed = false;
-        }
-    }
-
-    /// <summary>
-    /// Reconciles local rigidbody state with the authoritative server snapshot.
-    /// </summary>
-    void Owner_ProcessReconciliation()
-    {
-        if (!_reconcileActive || _isApplyingElastic)
-            return;
-
-        float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime;
-        Vector3 current = _rb.position;
-        Vector3 toTarget = _reconcileTarget - current;
-        float distance = toTarget.magnitude;
-
-        if (distance <= 0.0001f)
-        {
-            _reconcileActive = false;
-            return;
-        }
-
-        if (distance > hardSnapDist)
-        {
-            double now = _netTime.Now();
-            if (now - _lastHardSnapTime > hardSnapRateLimitSeconds)
-            {
-                _pendingHardSnap = _reconcileTarget;
-                _doHardSnapNextFixed = true;
-                _reconcileActive = false;
-                _lastHardSnapTime = now;
-                _telemetry?.Increment("reconcile.hard_snaps");
-                _telemetry?.Increment($"client.{OwnerClientId}.hard_snaps");
-            }
+            if (IsOwner)
+                TickOwnerClient();
             else
-            {
-                Vector3 step = Vector3.ClampMagnitude(toTarget, maxAllowed);
-                Vector3 next = current + step;
-                next = Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
-                _rb.MovePosition(next);
-                if (_agent) _agent.nextPosition = next;
-                _telemetry?.Increment("reconcile.rate_limited_snaps");
-            }
-            return;
+                TickRemoteClient();
+
+            if (IsServerInitialized)
+                _chunk?.UpdatePlayerChunk(this, _rb.position);
+
+            if (IsServerStarted)
+                TickServerResendLoop();
         }
 
-        float alpha = 1f - Mathf.Exp(-reconcileRate * Time.fixedDeltaTime * 0.66f);
-        Vector3 desired = Vector3.Lerp(current, _reconcileTarget, alpha);
-        Vector3 capped = Vector3.MoveTowards(current, desired, maxAllowed);
-        Vector3 smoothed = Vector3.Lerp(current, capped, 1f - reconciliationSmoothing);
+        /// <summary>
+        /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
+        /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
+        /// </summary>
+        void TickOwnerClient()
+        {
+            Owner_Send();
+            Owner_ApplyElasticCorrection();
+            Owner_ProcessHardSnap();
+            Owner_ProcessReconciliation();
+        }
 
-        _rb.MovePosition(smoothed);
-        if (_agent) _agent.nextPosition = smoothed;
+        /// <summary>
+        /// Updates interpolation for remote-controlled instances.
+        /// </summary>
+        void TickRemoteClient()
+        {
+            Remote_Update();
+        }
 
-        if ((smoothed - _reconcileTarget).sqrMagnitude < 0.0004f)
-            _reconcileActive = false;
+        /// <summary>
+        /// Handles retry scheduling for reliable full snapshots on the server.
+        /// </summary>
+        void TickServerResendLoop()
+        {
+            if (_retryManager.IsEmpty)
+                return;
 
-        _telemetry?.Increment("reconcile.smooth_steps");
-    }
+            double now = _netTime.Now();
+            _retryManager.CollectDue(now, FULL_RETRY_SECONDS, FULL_RETRY_MAX, _serverRetryScratch);
 
-    /// <summary>
-    /// Maintains the shard reassembly buffer lifetime.
-    /// </summary>
-    void ProcessShardBufferTimeouts()
-    {
-        CheckShardBufferTimeouts();
-    }
+            foreach (var conn in _serverRetryScratch)
+            {
+                if (!_retryManager.TryGetRecord(conn, out var record))
+                    continue;
+
+                if (record.RetryCount >= FULL_RETRY_MAX)
+                    continue;
+
+                if (record.HasShards)
+                {
+                    byte[] lastFull = record.Payload;
+                    ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
+                    int fullLen = (lastFull != null) ? lastFull.Length : 0;
+
+                    uint messageId = _nextOutgoingMessageId++;
+                    if (verboseNetLog)
+                    {
+                        Debug.Log(
+                            $"[Server.Debug] Retry sending shards messageId={messageId} " +
+                            $"totalShards={record.Shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
+                    }
+
+                    foreach (var shard in record.Shards)
+                    {
+                        if (verboseNetLog)
+                            Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={_packingService.PreviewBytes(shard, 8)}");
+
+                        byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
+                        TargetPackedShardTo(conn, envelopeBytes);
+                    }
+                }
+                else if (record.Payload != null)
+                {
+                    byte[] payloadEnv = CreateEnvelopeBytes(record.Payload);
+                    TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(record.Payload));
+                }
+
+                _retryManager.MarkSent(conn, _netTime.Now());
+                _telemetry?.Increment("pack.full_retry");
+            }
+
+            _serverRetryScratch.Clear();
+        }
+
+        /// <summary>
+        /// Applies owner-side elastic correction towards the authoritative server target.
+        /// </summary>
+        void Owner_ApplyElasticCorrection()
+        {
+            EnsureOwnerRuntime();
+
+            if (_ownerRuntime == null)
+                return;
+
+            var ctx = new PlayerDriverOwnerRuntime.ElasticContext(
+                Time.fixedDeltaTime,
+                maxCorrectionSpeed,
+                correctionDecay,
+                correctionMinVisible,
+                _telemetry,
+                OwnerClientId,
+                _rb,
+                _core,
+                _agent);
+
+            _ownerRuntime.TickElastic(ctx);
+        }
+
+        /// <summary>
+        /// Processes pending hard snap requests accumulated during reconciliation.
+        /// </summary>
+        void Owner_ProcessHardSnap()
+        {
+            EnsureOwnerRuntime();
+
+            if (_ownerRuntime == null || _ownerRuntime.IsElasticActive)
+                return;
+
+            if (_ownerRuntime.ConsumeHardSnap(out var target))
+            {
+                _rb.MovePosition(target);
+                if (_core && _core.visualRoot != null)
+                    _core.visualRoot.position = target;
+                if (_agent)
+                    _agent.nextPosition = target;
+            }
+        }
+
+        /// <summary>
+        /// Reconciles local rigidbody state with the authoritative server snapshot.
+        /// </summary>
+        void Owner_ProcessReconciliation()
+        {
+            EnsureOwnerRuntime();
+
+            if (_ownerRuntime == null || _ownerRuntime.IsElasticActive || !_ownerRuntime.ReconcileActive)
+                return;
+
+            var ctx = new PlayerDriverOwnerRuntime.ReconcileContext(
+                Time.fixedDeltaTime,
+                maxCorrectionSpeed,
+                hardSnapDist,
+                hardSnapRateLimitSeconds,
+                reconcileRate,
+                reconciliationSmoothing,
+                _netTime.Now(),
+                _telemetry,
+                OwnerClientId,
+                _rb,
+                _core,
+                _agent);
+
+            _ownerRuntime.TickReconciliation(ctx);
+        }
+
+        /// <summary>
+        /// Maintains the shard reassembly buffer lifetime.
+        /// </summary>
+        void ProcessShardBufferTimeouts()
+        {
+            CheckShardBufferTimeouts();
+        }
 
     // ---------- owner side ----------
     void Owner_Send()
@@ -281,47 +191,34 @@ public partial class PlayerNetworkDriverFishNet
         if (_shuttingDown || s_AppQuitting)
             return;
 
-        _sendDt = 1f / Mathf.Max(1, sendRateHz);
-        _sendTimer += Time.fixedDeltaTime;
-        if (_sendTimer < _sendDt)
-            return;
-        _sendTimer -= _sendDt;
+        EnsureOwnerRuntime();
 
-        _lastSeqSent++;
+        var ctx = new PlayerDriverOwnerRuntime.SendContext(
+            Time.fixedDeltaTime,
+            sendRateHz,
+            _core,
+            _rb,
+            _ctm,
+            _clockSync,
+            _netTime,
+            _telemetry,
+            OwnerClientId,
+            NextInputSequence,
+            CmdSendInput,
+            () => Time.timeAsDouble);
 
-        Vector3 pos = _rb.position;
-        Vector3 dir = _core.DebugLastMoveDir;
-        bool running = _core.IsRunning;
-        bool isCTM = _ctm && _ctm.HasPath;
-        Vector3[] pathCorners = isCTM ? _ctm.GetPathCorners() : null;
-
-        double localClientTime = Time.timeAsDouble;
-        double timestampToSend =
-            _clockSync != null
-                ? _clockSync.ClientToServerTime(localClientTime)
-                : _netTime.Now();
-
-        _telemetry?.Observe(
-            $"client.{OwnerClientId}.sent_timestamp_diff_ms",
-            (timestampToSend - localClientTime) * 1000.0);
-
-        CmdSendInput(dir, pos, running, _lastSeqSent, isCTM, pathCorners, timestampToSend);
-
-        var input = new InputState(dir, running, _lastSeqSent, _sendDt, localClientTime);
-        _inputBuf.Enqueue(input);
-        if (_inputBuf.Count > 128)
-            _inputBuf.Dequeue();
+        _ownerRuntime.TickSend(ctx, _shuttingDown);
     }
 
     // ---------- remotes render ----------
     void Remote_Update()
     {
-        if (_buffer.Count == 0)
+        if (_remoteState.Buffer.Count == 0)
             return;
 
-        _back = Mathf.Lerp((float)_back, (float)_backTarget, Time.deltaTime * 1.0f);
+        _remoteState.Back = Mathf.Lerp((float)_remoteState.Back, (float)_remoteState.BackTarget, Time.deltaTime * 1.0f);
         double now = _netTime.Now();
-        double renderT = now - _back;
+        double renderT = now - _remoteState.Back;
 
         if (TryGetBracket(renderT, out MovementSnapshot A, out MovementSnapshot B))
             Remote_RenderInterpolated(A, B, renderT);
@@ -349,7 +246,9 @@ public partial class PlayerNetworkDriverFishNet
             ? Vector3.Lerp(A.pos, B.pos, t)
             : Hermite(A.pos, A.vel * (float)span, B.pos, B.vel * (float)span, t);
 
-        DriveRemote(target, A.animState);
+        bool hasVerticalIntent = Mathf.Abs(A.vel.y) > 0.0001f || Mathf.Abs(B.vel.y) > 0.0001f;
+
+        DriveRemote(target, A.animState, hasVerticalIntent);
     }
 
     /// <summary>
@@ -357,16 +256,23 @@ public partial class PlayerNetworkDriverFishNet
     /// </summary>
     void Remote_RenderExtrapolated(double now)
     {
-        MovementSnapshot last = _buffer[_buffer.Count - 1];
+        var buffer = _remoteState.Buffer;
+        MovementSnapshot last = buffer[buffer.Count - 1];
         double dt = Math.Min(now - last.serverTime, 0.15);
         Vector3 target = last.pos + last.vel * (float)dt;
-        DriveRemote(target, last.animState);
+        bool hasVerticalIntent = Mathf.Abs(last.vel.y) > 0.0001f;
+        DriveRemote(target, last.animState, hasVerticalIntent);
     }
 
-    void DriveRemote(Vector3 target, byte animState)
+    void DriveRemote(Vector3 target, byte animState, bool hasVerticalIntent)
     {
-        if (ignoreNetworkY)
-            target.y = transform.position.y;
+        Func<Vector3, float> sampler = (_core != null) ? new Func<Vector3, float>(_core.SampleGroundY) : null;
+        target = _elevationPolicy.ResolveClient(
+            target,
+            _rb.position,
+            sampler,
+            elevationPolicy,
+            elevationPolicy == ElevationPolicyMode.PreserveNetwork || hasVerticalIntent);
 
         Transform vr = _core ? _core.visualRoot : null;
         Vector3 current = (remoteMoveVisualOnly && vr) ? vr.position : _rb.position;
@@ -378,11 +284,11 @@ public partial class PlayerNetworkDriverFishNet
         else
             _rb.position = smoothed;
 
-        Vector3 moveVec = smoothed - _remoteLastRenderPos;
+        Vector3 moveVec = smoothed - _remoteState.LastRenderPos;
         float dt = Mathf.Max(Time.deltaTime, 1e-6f);
         float rawSpeed = moveVec.magnitude / dt;
-        _remoteDisplaySpeed = Mathf.Lerp(
-            _remoteDisplaySpeed,
+        _remoteState.DisplaySpeed = Mathf.Lerp(
+            _remoteState.DisplaySpeed,
             rawSpeed,
             Time.deltaTime * remoteAnimSmooth);
 
@@ -390,7 +296,7 @@ public partial class PlayerNetworkDriverFishNet
         {
             Vector3 dir = moveVec;
             dir.y = 0f;
-            if (dir.sqrMagnitude > 0.0004f && _remoteDisplaySpeed > 0.5f)
+            if (dir.sqrMagnitude > 0.0004f && _remoteState.DisplaySpeed > 0.5f)
             {
                 Quaternion face = Quaternion.LookRotation(dir.normalized);
                 vr.rotation = Quaternion.Slerp(vr.rotation, face, Time.deltaTime * 6f);
@@ -398,11 +304,11 @@ public partial class PlayerNetworkDriverFishNet
             }
         }
 
-        _remoteLastRenderPos = smoothed;
+        _remoteState.LastRenderPos = smoothed;
 
-        _core.SafeAnimSpeedRaw(_remoteDisplaySpeed);
+        _core.SafeAnimSpeedRaw(_remoteState.DisplaySpeed);
         bool shouldRun = (animState == 2) &&
-                         (_remoteDisplaySpeed > remoteRunSpeedThreshold * 0.75f);
+                         (_remoteState.DisplaySpeed > remoteRunSpeedThreshold * 0.75f);
         _core.SafeAnimRun(shouldRun);
     }
 
@@ -419,19 +325,12 @@ public partial class PlayerNetworkDriverFishNet
             return;
         }
 
-        while (_inputBuf.Count > 0 && _inputBuf.Peek().seq <= serverSeq)
-            _inputBuf.Dequeue();
+        EnsureOwnerRuntime();
 
-        Vector3 corrected = serverPos;
-        foreach (var inp in _inputBuf)
-        {
-            float spd = inp.running
-                ? _core.speed * _core.runMultiplier
-                : _core.speed;
+        var inputBuffer = _ownerRuntime.InputBuffer;
+        _ownerRuntime.ClearInputBufferUpTo(serverSeq);
 
-            if (inp.dir.sqrMagnitude > 1e-6f)
-                corrected += inp.dir.normalized * spd * inp.dt;
-        }
+        Vector3 corrected = _ownerRuntime.IntegratePendingInputs(serverPos, _core);
 
         float errXZ = Vector2.Distance(
             new Vector2(_rb.position.x, _rb.position.z),
@@ -440,8 +339,15 @@ public partial class PlayerNetworkDriverFishNet
         if (errXZ < deadZone)
             return;
 
-        if (ignoreNetworkY)
-            corrected.y = transform.position.y;
+        Func<Vector3, float> sampler = (_core != null) ? new Func<Vector3, float>(_core.SampleGroundY) : null;
+        bool hasVerticalIntent = elevationPolicy == ElevationPolicyMode.PreserveNetwork ||
+                                 (_core != null && Mathf.Abs(_core.DebugLastMoveDir.y) > 0.0001f);
+        corrected = _elevationPolicy.ResolveClient(
+            corrected,
+            _rb.position,
+            sampler,
+            elevationPolicy,
+            hasVerticalIntent);
 
         var rTags = new Dictionary<string, string>
         {
@@ -457,7 +363,7 @@ public partial class PlayerNetworkDriverFishNet
 
         int sc = 0;
         var sample = new List<string>();
-        foreach (var inp in _inputBuf)
+        foreach (var inp in inputBuffer)
         {
             if (sc++ >= 6)
                 break;
@@ -469,8 +375,7 @@ public partial class PlayerNetworkDriverFishNet
 
         _telemetry?.Event("reconcile.requested", rTags, rMetrics);
 
-        _reconcileTarget = corrected;
-        _reconcileActive = true;
+        _ownerRuntime.SetReconcileTarget(corrected);
         _lastReconcileSentTime = now;
 
         _telemetry?.Increment(
@@ -487,26 +392,25 @@ public partial class PlayerNetworkDriverFishNet
         if (dist < correctionMinVisible)
             return;
 
-        _isApplyingElastic = true;
-        _elasticStartPos = _rb.position;
-        _elasticTargetPos = target;
-        _elasticElapsed = 0f;
-        _elasticDuration = Mathf.Max(0.05f, correctionDurationSeconds);
-        _elasticCurrentMultiplier = correctionInitialMultiplier;
+        EnsureOwnerRuntime();
+
+        float duration = Mathf.Max(0.05f, correctionDurationSeconds);
+        _ownerRuntime.StartElastic(_rb.position, target, duration, correctionInitialMultiplier);
 
         _telemetry?.Event("elastic.start",
             new Dictionary<string, string>
             {
                 { "clientId", OwnerClientId.ToString() },
-                { "startPos", $"{_elasticStartPos.x:0.00},{_elasticStartPos.y:0.00},{_elasticStartPos.z:0.00}" },
-                { "targetPos", $"{_elasticTargetPos.x:0.00},{_elasticTargetPos.y:0.00},{_elasticTargetPos.z:0.00}" }
+                { "startPos", $"{_rb.position.x:0.00},{_rb.position.y:0.00},{_rb.position.z:0.00}" },
+                { "targetPos", $"{target.x:0.00},{target.y:0.00},{target.z:0.00}" }
             },
             new Dictionary<string, double>
             {
                 { "dist_cm", dist * 100.0 },
-                { "duration_s", _elasticDuration }
+                { "duration_s", duration }
             });
 
         _telemetry?.Increment($"client.{OwnerClientId}.elastic_started");
+    }
     }
 }
