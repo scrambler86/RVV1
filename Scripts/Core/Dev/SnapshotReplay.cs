@@ -3,8 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
-// Lightweight snapshot of player-relevant state for deterministic replay.
-// Keep minimal: pos, vel, animState, seq, deterministic RNG state if used by movement.
 [Serializable]
 public struct DeterministicSnapshot
 {
@@ -21,7 +19,6 @@ public class SnapshotReplay : MonoBehaviour
     public float tickHz = 60f;
 
     private readonly List<DeterministicSnapshot> _buffer = new List<DeterministicSnapshot>();
-    private double _lastSaveTime = 0.0;
 
     void FixedUpdate()
     {
@@ -39,18 +36,16 @@ public class SnapshotReplay : MonoBehaviour
             animState = anim
         };
         _buffer.Add(snap);
-        // trim old
         double cutoff = Time.timeAsDouble - historySeconds;
         _buffer.RemoveAll(s => s.serverTime < cutoff);
     }
 
-    // Returns the most recent snapshot at or before targetTime
     public bool TryGetSnapshotAt(double targetTime, out DeterministicSnapshot snap)
     {
         snap = default;
         if (_buffer.Count == 0) return false;
         DeterministicSnapshot best = _buffer[0];
-        for (int i = 0; i < _buffer.Count; ++i)
+        for (int i = 0; i < _buffer.Count; i++)
         {
             if (_buffer[i].serverTime <= targetTime) best = _buffer[i];
             else break;
@@ -64,8 +59,6 @@ public class SnapshotReplay : MonoBehaviour
         return _buffer.ToArray();
     }
 
-    // Simple replay helper (calls back into provided applier)
-    // NOTE: IEnumerator (non-generic) is required by Unity coroutines.
     public IEnumerator ReplayFromTo(double fromTime, double toTime, Action<DeterministicSnapshot> apply)
     {
         foreach (var s in _buffer)

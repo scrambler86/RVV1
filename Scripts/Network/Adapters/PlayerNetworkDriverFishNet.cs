@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
-using Game.Network; // for ClockSyncManager (client-side hook)
+using Game.Network; // ClockSyncManager, AntiCheat, etc.
 using UnityEngine;
 using UnityEngine.AI;
 

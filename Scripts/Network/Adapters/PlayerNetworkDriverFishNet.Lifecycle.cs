@@ -1,6 +1,7 @@
 using System;
 using FishNet;
 using FishNet.Connection;
+using FishNet.Object;
 using UnityEngine;
 using UnityEngine.AI;
 using Game.Network;
