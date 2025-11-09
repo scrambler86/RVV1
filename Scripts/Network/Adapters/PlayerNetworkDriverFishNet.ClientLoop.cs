@@ -1,6 +1,5 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Linq;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
@@ -16,6 +15,8 @@ namespace Game.Networking.Adapters
             if (!IsSpawned || _shuttingDown || s_AppQuitting)
                 return;
 
+            EnsureServices();
+
             ProcessShardBufferTimeouts();
 
             if (IsOwner)
@@ -30,15 +31,9 @@ namespace Game.Networking.Adapters
                 TickServerResendLoop();
         }
 
-        // Mantiene vivo il buffer shard (timeout + cleanup)
-        // Implementazione effettiva in altro partial: CheckShardBufferTimeouts().
-        void ProcessShardBufferTimeouts()
-        {
-            CheckShardBufferTimeouts();
-        }
-
         /// <summary>
-        /// Owner-side: invio input, elastic correction, hard snap, reconcile.
+        /// Executes the owner-side pipeline (input send, elastic correction, reconciliation).
+        /// Split out from <see cref="FixedUpdate"/> to keep the frame loop readable.
         /// </summary>
         void TickOwnerClient()
         {
@@ -49,7 +44,7 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Remote-side: sola interpolazione / extrapolazione.
+        /// Updates interpolation for remote-controlled instances.
         /// </summary>
         void TickRemoteClient()
         {
@@ -57,65 +52,42 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Server-side: retry per full snapshot affidabili (FEC / full fallback).
+        /// Handles retry scheduling for reliable full snapshots on the server.
         /// </summary>
         void TickServerResendLoop()
         {
-            if (_lastFullPayload.Count == 0 && _lastFullShards.Count == 0)
+            if (_retryManager.IsEmpty)
                 return;
 
             double now = _netTime.Now();
             _serverRetryScratch.Clear();
 
-            // Payload completi in attesa di ACK
-            foreach (var kv in _lastFullPayload)
+            foreach (var conn in _retryManager.EnumerateConnections())
             {
-                var conn = kv.Key;
                 if (conn == null || !conn.IsActive)
                     continue;
 
-                if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
+                if (!_retryManager.TryGetRecord(conn, out var record))
                     continue;
 
-                int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-                if (tries >= FULL_RETRY_MAX)
+                if (record.RetryCount >= FULL_RETRY_MAX)
                     continue;
 
-                if (now - sentAt > FULL_RETRY_SECONDS)
-                    _serverRetryScratch.Add(conn);
+                if (now - record.LastSentAt <= FULL_RETRY_SECONDS)
+                    continue;
+
+                _serverRetryScratch.Add(conn);
             }
 
-            // Shard FEC in attesa di ACK
-            foreach (var kv in _lastFullShards)
-            {
-                var conn = kv.Key;
-                if (conn == null || !conn.IsActive)
-                    continue;
-
-                if (!_lastFullSentAt.TryGetValue(conn, out var sentAt))
-                    continue;
-
-                int tries = _fullRetryCount.TryGetValue(conn, out var count) ? count : 0;
-                if (tries >= FULL_RETRY_MAX)
-                    continue;
-
-                if (now - sentAt > FULL_RETRY_SECONDS)
-                    _serverRetryScratch.Add(conn);
-            }
-
-            // Retry effettivo
             foreach (var conn in _serverRetryScratch)
             {
-                if (_lastFullShards.TryGetValue(conn, out var shards) &&
-                    shards != null && shards.Count > 0)
-                {
-                    byte[] lastFull = null;
-                    if (_lastFullPayload.TryGetValue(conn, out var payloadBytes))
-                        lastFull = payloadBytes;
+                if (!_retryManager.TryGetRecord(conn, out var record))
+                    continue;
 
-                    ulong fullHash = (lastFull != null)
-                        ? EnvelopeUtil.ComputeHash64(lastFull)
-                        : 0;
+                if (record.HasShards)
+                {
+                    byte[] lastFull = record.Payload;
+                    ulong fullHash = (lastFull != null) ? EnvelopeUtil.ComputeHash64(lastFull) : 0;
                     int fullLen = (lastFull != null) ? lastFull.Length : 0;
 
                     uint messageId = _nextOutgoingMessageId++;
@@ -123,31 +95,25 @@ namespace Game.Networking.Adapters
                     {
                         Debug.Log(
                             $"[Server.Debug] Retry sending shards messageId={messageId} " +
-                            $"totalShards={shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
+                            $"totalShards={record.Shards.Count} fullLen={fullLen} fullHash=0x{fullHash:X16}");
                     }
 
-                    foreach (var shard in shards)
+                    foreach (var shard in record.Shards)
                     {
                         if (verboseNetLog)
-                            Debug.Log(
-                                $"[Server.Debug] Retry shard len={shard.Length} first8={BytesPreview(shard, 8)}");
+                            Debug.Log($"[Server.Debug] Retry shard len={shard.Length} first8={_packingService.PreviewBytes(shard, 8)}");
 
-                        byte[] envelopeBytes =
-                            CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
+                        byte[] envelopeBytes = CreateEnvelopeBytesForShard(shard, messageId, fullLen, fullHash);
                         TargetPackedShardTo(conn, envelopeBytes);
                     }
                 }
-                else if (_lastFullPayload.TryGetValue(conn, out var payload))
+                else if (record.Payload != null)
                 {
-                    byte[] payloadEnv = CreateEnvelopeBytes(payload);
-                    TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(payload));
+                    byte[] payloadEnv = CreateEnvelopeBytes(record.Payload);
+                    TargetPackedSnapshotTo(conn, payloadEnv, ComputeStateHashFromPayload(record.Payload));
                 }
 
-                _lastFullSentAt[conn] = _netTime.Now();
-                _fullRetryCount[conn] = _fullRetryCount.TryGetValue(conn, out var previousTries)
-                    ? previousTries + 1
-                    : 1;
-
+                _retryManager.MarkSent(conn, _netTime.Now());
                 _telemetry?.Increment("pack.full_retry");
             }
 
@@ -155,26 +121,12 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Owner-side elastic correction verso target autorevole.
+        /// Applies owner-side elastic correction towards the authoritative server target.
         /// </summary>
         void Owner_ApplyElasticCorrection()
         {
             if (!_isApplyingElastic)
                 return;
-
-            float lastPlanarSpeed = (_core != null) ? _core.DebugPlanarSpeed : 0f;
-            float distToTarget = Vector3.Distance(_rb.position, _elasticTargetPos);
-
-            // Evita micro jitter quando il player è praticamente fermo vicino al target.
-            if (lastPlanarSpeed < 0.02f &&
-                distToTarget < Mathf.Max(0.06f, correctionMinVisible))
-            {
-                _isApplyingElastic = false;
-                _elasticElapsed = 0f;
-                _elasticCurrentMultiplier = 1f;
-                _telemetry?.Increment($"client.{OwnerClientId}.elastic_cancelled_at_rest");
-                return;
-            }
 
             _elasticElapsed += Time.fixedDeltaTime;
             float t = Mathf.Clamp01(_elasticElapsed / _elasticDuration);
@@ -185,10 +137,9 @@ namespace Game.Networking.Adapters
             float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime * _elasticCurrentMultiplier;
             Vector3 next = Vector3.MoveTowards(current, target, maxAllowed);
 
-            if (remoteMoveVisualOnly && _core && _core.visualRoot != null)
+            _rb.MovePosition(next);
+            if (_core && _core.visualRoot != null)
                 _core.visualRoot.position = next;
-            else
-                _rb.MovePosition(next);
 
             if (_agent)
                 _agent.nextPosition = next;
@@ -199,8 +150,7 @@ namespace Game.Networking.Adapters
 
             _elasticCurrentMultiplier *= correctionDecay;
 
-            if (t >= 1f ||
-                Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
+            if (t >= 1f || Vector3.Distance(next, _elasticTargetPos) < correctionMinVisible)
             {
                 _isApplyingElastic = false;
                 _elasticElapsed = 0f;
@@ -210,7 +160,7 @@ namespace Game.Networking.Adapters
         }
 
         /// <summary>
-        /// Hard snap owner-side se necessario.
+        /// Performs pending hard snap correction (owner).
         /// </summary>
         void Owner_ProcessHardSnap()
         {
@@ -221,61 +171,44 @@ namespace Game.Networking.Adapters
             Vector3 target = _pendingHardSnap;
             float distance = Vector3.Distance(current, target);
 
-            // Se vicino, snap morbido con MovePosition.
-            if (distance <= 0.15f)
+            if (distance > hardSnapDist * 1.1f &&
+                (Time.realtimeSinceStartup - (float)_lastHardSnapTime) > 0.05f)
+            {
+                Vector3 next = Vector3.MoveTowards(
+                    current, target,
+                    maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
+
+                _rb.MovePosition(next);
+                if (_core && _core.visualRoot != null)
+                    _core.visualRoot.position = next;
+                if (_agent)
+                    _agent.nextPosition = next;
+                if (Vector3.Distance(next, target) < 0.05f)
+                    _doHardSnapNextFixed = false;
+            }
+            else
             {
                 _rb.MovePosition(target);
-                if (_agent) _agent.nextPosition = target;
+                if (_core && _core.visualRoot != null)
+                    _core.visualRoot.position = target;
+                if (_agent)
+                    _agent.nextPosition = target;
                 _doHardSnapNextFixed = false;
-                return;
             }
-
-            // Se molto lontano, warp sicuro una volta.
-            if (distance > hardSnapDist * 1.5f)
-            {
-                bool prevKinematic = _rb.isKinematic;
-                _rb.isKinematic = true;
-                _rb.position = target;
-                _rb.isKinematic = prevKinematic;
-
-                if (_agent) _agent.Warp(target);
-                _doHardSnapNextFixed = false;
-                return;
-            }
-
-            // Altrimenti avvicina con MoveTowards.
-            Vector3 next = Vector3.MoveTowards(
-                current, target,
-                maxCorrectionSpeed * Time.fixedDeltaTime * 1.8f);
-
-            _rb.MovePosition(next);
-            if (_agent) _agent.nextPosition = next;
-
-            if (Vector3.Distance(next, target) < 0.05f)
-                _doHardSnapNextFixed = false;
         }
 
         /// <summary>
-        /// Reconcile dolce verso lo stato server authoritative.
+        /// Reconciles local rigidbody state with the authoritative server snapshot.
         /// </summary>
         void Owner_ProcessReconciliation()
         {
             if (!_reconcileActive || _isApplyingElastic)
                 return;
 
-            float lastPlanarSpeed = (_core != null) ? _core.DebugPlanarSpeed : 0f;
-
+            float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime;
             Vector3 current = _rb.position;
             Vector3 toTarget = _reconcileTarget - current;
             float distance = toTarget.magnitude;
-
-            // Se quasi allineato e fermo, termina.
-            if (lastPlanarSpeed < 0.02f &&
-                distance < Mathf.Max(0.06f, correctionMinVisible))
-            {
-                _reconcileActive = false;
-                return;
-            }
 
             if (distance <= 0.0001f)
             {
@@ -283,7 +216,6 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            // Se molto distante → hard snap (con rate limit).
             if (distance > hardSnapDist)
             {
                 double now = _netTime.Now();
@@ -298,35 +230,42 @@ namespace Game.Networking.Adapters
                 }
                 else
                 {
-                    float maxAllowed = maxCorrectionSpeed * Time.fixedDeltaTime;
                     Vector3 step = Vector3.ClampMagnitude(toTarget, maxAllowed);
                     Vector3 next = current + step;
-                    Vector3 smoothedRateLimited =
-                        Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
-
-                    _rb.MovePosition(smoothedRateLimited);
-                    if (_agent) _agent.nextPosition = smoothedRateLimited;
+                    next = Vector3.Lerp(current, next, 1f - reconciliationSmoothing);
+                    _rb.MovePosition(next);
+                    if (_core && _core.visualRoot != null)
+                        _core.visualRoot.position = next;
+                    if (_agent)
+                        _agent.nextPosition = next;
                     _telemetry?.Increment("reconcile.rate_limited_snaps");
                 }
-
                 return;
             }
 
-            // Smooth reconcile.
             float alpha = 1f - Mathf.Exp(-reconcileRate * Time.fixedDeltaTime * 0.66f);
-            float maxAllowedFinal = maxCorrectionSpeed * Time.fixedDeltaTime;
-
             Vector3 desired = Vector3.Lerp(current, _reconcileTarget, alpha);
-            Vector3 capped = Vector3.MoveTowards(current, desired, maxAllowedFinal);
+            Vector3 capped = Vector3.MoveTowards(current, desired, maxAllowed);
             Vector3 smoothed = Vector3.Lerp(current, capped, 1f - reconciliationSmoothing);
 
             _rb.MovePosition(smoothed);
-            if (_agent) _agent.nextPosition = smoothed;
+            if (_core && _core.visualRoot != null)
+                _core.visualRoot.position = smoothed;
+            if (_agent)
+                _agent.nextPosition = smoothed;
 
             if ((smoothed - _reconcileTarget).sqrMagnitude < 0.0004f)
                 _reconcileActive = false;
 
             _telemetry?.Increment("reconcile.smooth_steps");
+        }
+
+        /// <summary>
+        /// Maintains the shard reassembly buffer lifetime.
+        /// </summary>
+        void ProcessShardBufferTimeouts()
+        {
+            CheckShardBufferTimeouts();
         }
 
         // ---------- owner input send ----------

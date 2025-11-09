@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
-using System.Text;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
@@ -133,7 +132,12 @@ namespace Game.Networking.Adapters
         private INetTime _netTime;
         private IAntiCheatValidator _anti;
         private ChunkManager _chunk;
-        private TelemetryManager _telemetry;
+        private IDriverTelemetry _telemetry = DriverTelemetry.Null;
+        private ISnapshotPackingService _packingService;
+        private IFecService _fecService;
+        private IShardRegistry _shardRegistry;
+        private IFullSnapshotRetryManager _retryManager;
+        private bool _servicesResolved;
 
         private float _sendDt, _sendTimer;
         private uint _lastSeqSent, _lastSeqReceived;
@@ -186,11 +190,6 @@ namespace Game.Networking.Adapters
         private const double RECONCILE_COOLDOWN_SEC = 0.20;
 
         // ---------- Reliable full-keyframe + FEC storage ----------
-        private readonly Dictionary<NetworkConnection, byte[]> _lastFullPayload = new();
-        private readonly Dictionary<NetworkConnection, double> _lastFullSentAt = new();
-        private readonly Dictionary<NetworkConnection, int> _fullRetryCount = new();
-        private readonly Dictionary<NetworkConnection, List<byte[]>> _lastFullShards = new();
-
         private const double FULL_RETRY_SECONDS = 0.6;
         private const int FULL_RETRY_MAX = 4;
 
@@ -222,19 +221,18 @@ namespace Game.Networking.Adapters
         private uint _nextOutgoingMessageId = 1;
 
         // ---------- shard reassembly per-messageId (client) ----------
-        private readonly ShardBufferRegistry _shardRegistry = new();
-        private readonly List<uint> _shardTimeoutScratch = new();
+        private readonly List<ShardBufferKey> _shardTimeoutScratch = new();
         private const double SHARD_BUFFER_TIMEOUT_SECONDS = 2.0;
 
         // ---------- FEC suppression state ----------
         private readonly Dictionary<NetworkConnection, double> _fecSuppressedUntil = new();
         private const double FEC_DISABLE_DURATION_SECONDS = 10.0;
 
-        // Diagnostics: mappa envelope id -> (hash,len) server
-        private readonly Dictionary<uint, (ulong hash, int len)> _incomingEnvelopeMeta = new();
+        // Diagnostics: map incoming envelope key -> server-provided payloadHash / payloadLen
+        private readonly Dictionary<ShardBufferKey, (ulong hash, int len)> _incomingEnvelopeMeta = new();
 
-        // MessageIds CANARY (non tentar decodifica movement)
-        private readonly HashSet<uint> _canaryMessageIds = new();
+        // Track messageIds flagged as CANARY so we don't try to decode them as movement
+        private readonly HashSet<ShardBufferKey> _canaryMessageIds = new();
 
         // ------- CRC reporting helper (rate-limited, non-blocking) -------
         private void ReportCrcFailureOncePerWindow(string msg)
@@ -244,6 +242,7 @@ namespace Game.Networking.Adapters
 #else
             if (!enableCrcWarnings) return;
 #endif
+
             double now = Time.realtimeSinceStartup;
             if (_crcFirstFailTime < 0.0)
                 _crcFirstFailTime = now;
@@ -276,69 +275,6 @@ namespace Game.Networking.Adapters
             }
         }
 
-        // ------- ShardBufferRegistry -------
-        private sealed class ShardBufferRegistry
-        {
-            private readonly Dictionary<uint, List<ShardInfo>> _buffers = new();
-            private readonly Dictionary<uint, int> _totalCounts = new();
-            private readonly Dictionary<uint, double> _firstSeen = new();
-
-            public List<ShardInfo> GetOrCreate(uint messageId, ushort total, double now)
-            {
-                if (!_buffers.TryGetValue(messageId, out var list))
-                {
-                    list = new List<ShardInfo>(total);
-                    for (int i = 0; i < total; i++)
-                        list.Add(null);
-
-                    _buffers[messageId] = list;
-                    _totalCounts[messageId] = total;
-                    _firstSeen[messageId] = now;
-                    return list;
-                }
-
-                if (list.Count != total)
-                {
-                    if (list.Count < total)
-                    {
-                        for (int i = list.Count; i < total; i++)
-                            list.Add(null);
-                    }
-                    else
-                    {
-                        list.RemoveRange(total, list.Count - total);
-                    }
-
-                    _totalCounts[messageId] = total;
-                }
-
-                if (!_firstSeen.ContainsKey(messageId))
-                    _firstSeen[messageId] = now;
-
-                return list;
-            }
-
-            public int GetTotalCount(uint messageId) =>
-                _totalCounts.TryGetValue(messageId, out var total) ? total : 0;
-
-            public void Forget(uint messageId)
-            {
-                _buffers.Remove(messageId);
-                _totalCounts.Remove(messageId);
-                _firstSeen.Remove(messageId);
-            }
-
-            public void CollectExpired(double now, double timeoutSeconds, List<uint> expired)
-            {
-                expired.Clear();
-                foreach (var kv in _firstSeen)
-                {
-                    if (now - kv.Value > timeoutSeconds)
-                        expired.Add(kv.Key);
-                }
-            }
-        }
-
         // ------- PUBLIC WRAPPERS (for external hooks/helpers) -------
         public void HandlePackedShardPublic(byte[] shard)
         {
@@ -355,51 +291,16 @@ namespace Game.Networking.Adapters
             TargetPackedShardTo(conn, packedShard);
         }
 
-        // debug helper: preview primi N byte in hex
-        static string BytesPreview(byte[] b, int n)
-        {
-            if (b == null || b.Length == 0)
-                return "(null)";
-
-            int m = Math.Min(n, b.Length);
-            var sb = new StringBuilder();
-            for (int i = 0; i < m; ++i)
-                sb.AppendFormat("{0:X2}", b[i]);
-
-            if (b.Length > m)
-                sb.Append("..");
-
-            return sb.ToString();
-        }
-
-        // Crea envelope per payload singolo
         byte[] CreateEnvelopeBytes(byte[] payload)
         {
-            var env = new Envelope
-            {
-                messageId = _nextOutgoingMessageId++,
-                seq = _lastSeqSent,
-                payloadLen = payload?.Length ?? 0,
-                payloadHash = EnvelopeUtil.ComputeHash64(payload),
-                flags = 0
-            };
-
-            return EnvelopeUtil.Pack(env, payload);
+            EnsureServices();
+            return _packingService.CreateEnvelope(payload, ref _nextOutgoingMessageId, _lastSeqSent);
         }
 
-        // Crea envelope per shard con metadati del payload completo
         byte[] CreateEnvelopeBytesForShard(byte[] shard, uint messageId, int fullPayloadLen, ulong fullPayloadHash)
         {
-            var env = new Envelope
-            {
-                messageId = messageId,
-                seq = _lastSeqSent,
-                payloadLen = fullPayloadLen,
-                payloadHash = fullPayloadHash,
-                flags = 0
-            };
-
-            return EnvelopeUtil.Pack(env, shard);
+            EnsureServices();
+            return _packingService.CreateShardEnvelope(shard, messageId, _lastSeqSent, fullPayloadLen, fullPayloadHash);
         }
     }
 }

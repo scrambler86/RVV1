@@ -1,6 +1,6 @@
 namespace Game.Networking.Adapters
 {
-    #if CANARY_DEBUG
+#if CANARY_DEBUG
     using UnityEngine;
     using FishNet;
     using FishNet.Connection;
@@ -98,5 +98,5 @@ namespace Game.Networking.Adapters
             }
         }
     }
-    #endif // CANARY_DEBUG
+#endif // CANARY_DEBUG
 }

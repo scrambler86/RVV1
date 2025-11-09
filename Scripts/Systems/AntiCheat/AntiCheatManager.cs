@@ -1,4 +1,4 @@
-// [BOOKMARK: USING]
+﻿// [BOOKMARK: USING]
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
@@ -50,60 +50,31 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     // conteggio dei soft-fail per clientId
     private readonly Dictionary<int, int> _softFailCounts = new Dictionary<int, int>();
 
-    // =====================================================================
-    // 1) Metodo richiesto dall'interfaccia IAntiCheatValidator (senza dt)
-    // =====================================================================
-    // [BOOKMARK: API_NO_DT]
-    public bool ValidateInput(
-        IPlayerNetworkDriver drv,
-        uint seq,
-        double timestamp,
-        Vector3 predictedPos,
-        Vector3 lastServerPos,
-        float maxStepAllowance,
-        Vector3[] pathCorners,
-        bool running)
+    // ----------------- Interfaccia attesa -----------------
+    // Implementazione richiesta da IAntiCheatValidator.
+    // Nota: l'interfaccia non fornisce ServerDeltaTime, usiamo Time.fixedDeltaTime come fallback.
+    public bool ValidateInput(IPlayerNetworkDriver drv, uint seq, double clientTimestamp,
+                              Vector3 predictedPos, Vector3 lastServerPos,
+                              float maxStepWithSlack, Vector3[] pathCorners, bool runningFlag)
     {
-        // fallback: usiamo Time.fixedDeltaTime come dt lato server
         float dtServer = Time.fixedDeltaTime;
-        return ValidateInputInternal(
-            drv,
-            seq,
-            timestamp,
-            predictedPos,
-            lastServerPos,
-            maxStepAllowance,
-            pathCorners,
-            running,
-            dtServer
-        );
+        return ValidateInputInternal(drv, seq, clientTimestamp, predictedPos, lastServerPos, maxStepWithSlack, pathCorners, runningFlag, dtServer);
     }
 
-    // =====================================================================
-    // 2) Overload usato dal driver quando può passare dtServer
-    //    (NOTA: usa IPlayerNetworkDriver, non il tipo concreto!)
-    // =====================================================================
-    // [BOOKMARK: API_WITH_DT]
-    public bool ValidateInput(
-        IPlayerNetworkDriver drv,
-        uint seq,
-        double timestamp,
-        Vector3 predictedPos,
-        Vector3 lastServerPos,
-        float maxStepAllowance,
-        Vector3[] pathCorners,
-        bool running,
-        float dtServer)
+    // Manteniamo anche l'API "context" più comoda se qualcun altro la usa.
+    public bool ValidateInput(in AntiCheatInputContext context)
     {
+        float dtServer = context.ServerDeltaTime > 0f ? context.ServerDeltaTime : Time.fixedDeltaTime;
+
         return ValidateInputInternal(
-            drv,
-            seq,
-            timestamp,
-            predictedPos,
-            lastServerPos,
-            maxStepAllowance,
-            pathCorners,
-            running,
+            context.Driver,
+            context.Sequence,
+            context.ClientTimestamp,
+            context.ClientPredictedPosition,
+            context.LastServerPosition,
+            context.MaxStepAllowance,
+            context.PathCorners,
+            context.Running,
             dtServer
         );
     }
@@ -178,7 +149,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
             }
         }
 
-        // 4) cheap sim (opzionale)  verifica che la velocità planare non superi un tetto ragionevole
+        // 4) cheap sim (opzionale) — verifica che la velocità planare non superi un tetto ragionevole
         if (ok && enableCheapSim)
         {
             Vector3 delta = predictedPos - lastServerPos;
@@ -186,7 +157,7 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
             float speed = delta.magnitude / Mathf.Max(0.001f, dtServer);
 
             // fattore di margine (deriva dal tuo driver): maxSpeedTolerance già considerato nel maxStepAllowance,
-            // qui usiamo un tetto extra per spike ancora più eclatanti
+            // qui usiamo un tetto extra per spike ancora più "eclatanti"
             float hardCap = allowedSpeed * 1.8f;
             if (speed > hardCap)
             {

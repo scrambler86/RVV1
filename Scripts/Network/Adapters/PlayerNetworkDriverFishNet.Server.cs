@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using FishNet;
 using FishNet.Connection;
 using FishNet.Object;
@@ -55,18 +54,11 @@ namespace Game.Networking.Adapters
 
             bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
             if (hasVerticalInput)
-            {
                 result.y = startPos.y + dir.y * speed * dt;
-            }
             else if (_core != null)
-            {
-                // Proiezione a terra lato server per evitare drift verticale
                 result.y = _core.SampleGroundY(result);
-            }
             else
-            {
                 result.y = startPos.y;
-            }
 
             return result;
         }
@@ -77,6 +69,8 @@ namespace Game.Networking.Adapters
         {
             if (conn == null)
                 return false;
+
+            EnsureServices();
 
             if (_fecSuppressedUntil.TryGetValue(conn, out double until))
             {
@@ -95,6 +89,8 @@ namespace Game.Networking.Adapters
             if (conn == null)
                 return;
 
+            EnsureServices();
+
             _fecSuppressedUntil[conn] = _netTime.Now() + FEC_DISABLE_DURATION_SECONDS;
         }
 
@@ -111,6 +107,8 @@ namespace Game.Networking.Adapters
         {
             if (_shuttingDown || s_AppQuitting)
                 return;
+
+            EnsureServices();
 
             double now = _netTime.Now();
             if (!RateLimitOk(now))
@@ -152,10 +150,20 @@ namespace Game.Networking.Adapters
             bool ok = true;
             if (_anti != null)
             {
-                if (_anti is AntiCheatManager acm)
-                    ok = acm.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running, dtF);
-                else
-                    ok = _anti.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running);
+                // Build context and call unified interface
+                var ctx = new AntiCheatInputContext(
+                    this,
+                    seq,
+                    timestamp,
+                    predictedPos,
+                    _serverLastPos,
+                    maxStep,
+                    pathCorners,
+                    running,
+                    dtF
+                );
+
+                ok = _anti.ValidateInput(in ctx);
             }
 
             if (!ok)
@@ -227,8 +235,9 @@ namespace Game.Networking.Adapters
                 _telemetry?.Increment("anti_cheat.soft_clamps");
             }
 
-            // ---------- NavMesh + verticale ----------
+            // ---------- NavMesh + velocità ----------
             bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
+
             Vector3 finalPos = ok ? serverIntegratedPos : predictedPos;
 
             if (!hasVerticalInput && _core != null)
@@ -241,7 +250,6 @@ namespace Game.Networking.Adapters
                 NavMesh.SamplePosition(finalPos, out var nh, navMeshMaxSampleDist, NavMesh.AllAreas))
             {
                 finalPos = nh.position;
-
                 if (!hasVerticalInput && _core != null)
                 {
                     float sampleY = _core.SampleGroundY(finalPos);
@@ -313,14 +321,12 @@ namespace Game.Networking.Adapters
 
                 ulong stateHash = ComputeStateHashForSnapshot(snap);
 
-                _lastFullPayload[Owner] = full;
-                _lastFullSentAt[Owner] = _netTime.Now();
-                _fullRetryCount[Owner] = 0;
+                _retryManager.RecordPayload(Owner, full, _netTime.Now());
 
                 if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(Owner))
                 {
-                    var shards = BuildFecShards(full, fecShardSize, fecParityShards);
-                    _lastFullShards[Owner] = shards;
+                    var shards = _fecService.BuildShards(full, fecShardSize, fecParityShards);
+                    _retryManager.RecordShards(Owner, shards, _netTime.Now());
 
                     ulong fullHash = EnvelopeUtil.ComputeHash64(full);
                     int fullLen = full.Length;
@@ -340,7 +346,7 @@ namespace Game.Networking.Adapters
                         if (verboseNetLog)
                         {
                             Debug.Log(
-                                $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
+                                $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={_packingService.PreviewBytes(s, 8)}");
                         }
 
                         byte[] envelopeBytes =
@@ -509,7 +515,7 @@ namespace Game.Networking.Adapters
                 cy = (short)cell.y;
             }
 
-            int cs = _chunk ? _chunk.cellSize : DEFAULT_CHUNK_CELL_SIZE;
+            int cs = _chunk ? _chunk.cellSize : 128;
             return PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime,
                 snap.seq, cx, cy, cs);
@@ -573,14 +579,12 @@ namespace Game.Networking.Adapters
 
                 ulong stateHash = ComputeStateHashForSnapshot(snap);
 
-                _lastFullPayload[conn] = payload;
-                _lastFullSentAt[conn] = now;
-                _fullRetryCount[conn] = 0;
+                _retryManager.RecordPayload(conn, payload, now);
 
                 if (fecParityShards > 0 && !debugForceFullSnapshots && !IsFecSuppressed(conn))
                 {
-                    var shards = BuildFecShards(payload, fecShardSize, fecParityShards);
-                    _lastFullShards[conn] = shards;
+                    var shards = _fecService.BuildShards(payload, fecShardSize, fecParityShards);
+                    _retryManager.RecordShards(conn, shards, now);
 
                     ulong fullHash = EnvelopeUtil.ComputeHash64(payload);
                     int fullLen = payload.Length;
@@ -600,7 +604,7 @@ namespace Game.Networking.Adapters
                         if (verboseNetLog)
                         {
                             Debug.Log(
-                                $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={BytesPreview(s, 8)}");
+                                $"[Server.Debug] Shard idx={i} shardLen={s.Length} shardHead={_packingService.PreviewBytes(s, 8)}");
                         }
 
                         byte[] envelopeBytes =
@@ -641,12 +645,14 @@ namespace Game.Networking.Adapters
             if (_shuttingDown || s_AppQuitting)
                 return;
 
+            EnsureServices();
+
             int olen = payload?.Length ?? 0;
 
             if (verboseNetLog)
             {
                 Debug.Log(
-                    $"[Driver.Debug] ObserversPackedSnapshot len={olen} first8={BytesPreview(payload, 8)} " +
+                    $"[Driver.Debug] ObserversPackedSnapshot len={olen} first8={_packingService.PreviewBytes(payload, 8)} " +
                     $"envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
             }
 
@@ -670,7 +676,7 @@ namespace Game.Networking.Adapters
                 {
                     Debug.Log(
                         $"[Driver.Debug] ObserversPackedSnapshot envelope id={envObs.messageId} " +
-                        $"payloadLen={envObs.payloadLen} innerFirst8={BytesPreview(innerObs, 8)}");
+                        $"payloadLen={envObs.payloadLen} innerFirst8={_packingService.PreviewBytes(innerObs, 8)}");
                 }
 
                 payload = innerObs;
@@ -680,7 +686,7 @@ namespace Game.Networking.Adapters
                 if (verboseNetLog)
                 {
                     Debug.Log(
-                        $"[Driver.Debug] ObserversPackedSnapshot raw first8={BytesPreview(payload, 8)}");
+                        $"[Driver.Debug] ObserversPackedSnapshot raw first8={_packingService.PreviewBytes(payload, 8)}");
                 }
             }
 
@@ -695,13 +701,15 @@ namespace Game.Networking.Adapters
             if (_shuttingDown || s_AppQuitting)
                 return;
 
+            EnsureServices();
+
             int len = payload?.Length ?? 0;
 
             if (verboseNetLog)
             {
                 Debug.Log(
                     $"[Driver.Debug] TargetPackedSnapshotTo conn={conn?.ClientId} len={len} " +
-                    $"first8={BytesPreview(payload, 8)} " +
+                    $"first8={_packingService.PreviewBytes(payload, 8)} " +
                     $"envelope={EnvelopeUtil.TryUnpack(payload, out var _, out var _)}");
             }
 
@@ -725,12 +733,13 @@ namespace Game.Networking.Adapters
                 {
                     Debug.Log(
                         $"[Driver.Debug] TargetPackedSnapshotTo envelope id={env.messageId} " +
-                        $"payloadLen={env.payloadLen} innerFirst8={BytesPreview(inner, 8)}");
+                        $"payloadLen={env.payloadLen} innerFirst8={_packingService.PreviewBytes(inner, 8)}");
                 }
 
                 try
                 {
-                    _incomingEnvelopeMeta[env.messageId] = (env.payloadHash, env.payloadLen);
+                    var key = ShardBufferKey.ForConnection(conn, env.messageId);
+                    _incomingEnvelopeMeta[key] = (env.payloadHash, env.payloadLen);
                 }
                 catch { }
 
@@ -741,7 +750,7 @@ namespace Game.Networking.Adapters
                 if (verboseNetLog)
                 {
                     Debug.Log(
-                        $"[Driver.Debug] TargetPackedSnapshotTo raw first8={BytesPreview(payload, 8)} " +
+                        $"[Driver.Debug] TargetPackedSnapshotTo raw first8={_packingService.PreviewBytes(payload, 8)} " +
                         $"firstByte={(payload.Length > 0 ? payload[0] : 0)}");
                 }
             }
@@ -755,13 +764,15 @@ namespace Game.Networking.Adapters
             if (_shuttingDown || s_AppQuitting)
                 return;
 
+            EnsureServices();
+
             int slen = shard?.Length ?? 0;
 
             if (verboseNetLog)
             {
                 Debug.Log(
                     $"[Driver.Debug] TargetPackedShardTo conn={conn?.ClientId} len={slen} " +
-                    $"first8={BytesPreview(shard, 8)} " +
+                    $"first8={_packingService.PreviewBytes(shard, 8)} " +
                     $"envelope={EnvelopeUtil.TryUnpack(shard, out var _, out var _)}");
             }
 
@@ -772,7 +783,7 @@ namespace Game.Networking.Adapters
                 return;
             }
 
-            HandlePackedShard(shard);
+            HandlePackedShard(shard, conn);
         }
 
         [ServerRpc(RequireOwnership = false)]
@@ -781,14 +792,13 @@ namespace Game.Networking.Adapters
             if (_shuttingDown || s_AppQuitting)
                 return;
 
+            EnsureServices();
+
             var conn = base.Owner;
             if (conn == null)
                 return;
 
-            _lastFullPayload.Remove(conn);
-            _lastFullSentAt.Remove(conn);
-            _fullRetryCount.Remove(conn);
-            _lastFullShards.Remove(conn);
+            _retryManager.Clear(conn);
 
             _telemetry?.Increment($"client.{OwnerClientId}.full_ack");
         }
