@@ -20,18 +20,46 @@ namespace Game.Networking.Adapters
             if (!_rb) _rb = GetComponent<Rigidbody>();
             if (!_agent) _agent = GetComponent<NavMeshAgent>();
             if (!_ctm) _ctm = GetComponent<ClickToMoveAgent>();
+        }
 
-            _netTime = new NetTimeFishNet();
-            _anti = FindObjectOfType<AntiCheatManager>();
-            _chunk = FindObjectOfType<ChunkManager>();
-            _telemetry = FindObjectOfType<TelemetryManager>();
+        void RefreshRuntimeServices(bool refreshFactories = false)
+        {
+            var provider = AdapterServiceLocator.Provider ?? AdapterServiceLocator.DefaultProvider;
 
-            _clockSync = GetComponentInChildren<ClockSyncManager>();
+            _netTime = provider.ResolveNetTime(this) ?? AdapterServiceLocator.DefaultProvider.ResolveNetTime(this);
+            _anti = provider.ResolveAntiCheat(this) ?? _anti;
+            _chunk = provider.ResolveChunkManager(this) ?? _chunk;
+            _telemetry = provider.ResolveTelemetry(this) ?? DriverTelemetry.Null;
+            _clockSync = provider.ResolveClockSync(this) ?? _clockSync;
+
+            if (refreshFactories || _packingService == null)
+                _packingService = provider.CreatePackingService(this) ?? AdapterServiceLocator.DefaultProvider.CreatePackingService(this);
+
+            if (refreshFactories || _fecService == null)
+                _fecService = provider.CreateFecService(this) ?? AdapterServiceLocator.DefaultProvider.CreateFecService(this);
+
+            if (refreshFactories || _shardRegistry == null)
+                _shardRegistry = provider.CreateShardRegistry(this) ?? AdapterServiceLocator.DefaultProvider.CreateShardRegistry(this);
+
+            if (refreshFactories || _retryManager == null)
+                _retryManager = provider.CreateRetryManager(this) ?? AdapterServiceLocator.DefaultProvider.CreateRetryManager(this);
+
+            _servicesResolved = true;
+        }
+
+        void EnsureServices()
+        {
+            if (_servicesResolved && _netTime != null && _packingService != null && _fecService != null && _shardRegistry != null && _retryManager != null)
+                return;
+
+            RefreshRuntimeServices(true);
         }
 
         public override void OnStartClient()
         {
             base.OnStartClient();
+
+            EnsureServices();
 
             _sendDt = 1f / Mathf.Max(1, sendRateHz);
             _core.SetAllowInput(IsOwner);
@@ -52,15 +80,11 @@ namespace Game.Networking.Adapters
             }
 
             var tm = InstanceFinder.TimeManager;
-            double rtt = (tm != null)
-                ? Math.Max(0.01, tm.RoundTripTime / 1000.0)
-                : 0.06;
-
+            double rtt = (tm != null) ? Math.Max(0.01, tm.RoundTripTime / 1000.0) : 0.06;
             _back = _backTarget = ClampD(rtt * 0.6, minBack, maxBack);
 
             _haveAnchor = false;
             _baseSnap = default;
-
             _tokens = maxInputsPerSecond + burstAllowance;
             _lastRefill = _netTime.Now();
             _shuttingDown = false;
@@ -71,6 +95,8 @@ namespace Game.Networking.Adapters
         public override void OnStartServer()
         {
             base.OnStartServer();
+
+            EnsureServices();
 
             _shuttingDown = false;
             _chunk?.RegisterPlayer(this);

@@ -297,7 +297,7 @@ public class PlayerControllerCore : MonoBehaviour
         else
             return p;
 
-        // tolleranza leggermente più alta per evitare micro jitter
+        // tolleranza leggermente piÃ¹ alta per evitare micro jitter
         if (Mathf.Abs(targetY - p.y) < 0.03f)
             return p;
 

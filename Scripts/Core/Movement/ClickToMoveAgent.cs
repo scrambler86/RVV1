@@ -8,60 +8,55 @@ namespace Game.Networking.Adapters
     [RequireComponent(typeof(NavMeshAgent))]
     [RequireComponent(typeof(PlayerControllerCore))]
     public class ClickToMoveAgent : MonoBehaviour
-    {
+        {
         [Header("Camera input")]
         public Camera cam;
-        public int clickButton = 1; // 0 = LMB, 1 = RMB
-
+        public int clickButton = 1; // 0=LMB,1=RMB
+    
         [Header("NavMesh sampling")]
         public float maxSampleDist = 12f;
-
+    
         [Header("Anti-spam click")]
         public bool enableDebounce = true;
         public float clickCooldown = 0.06f;
         public bool enableMinRepathDistance = true;
         public float minRepathDistance = 0.25f;
-
+    
         [Header("UI blocking")]
         public string uiLayerName = "UI";
         public bool blockUIClicks = true;
         public bool allowBypassKey = true;
         public KeyCode bypassKey = KeyCode.LeftAlt;
-
+    
         [Header("Networking / Local Input")]
         public bool allowServerOnlyInput = true;
-
+    
         private NavMeshAgent _agent;
         private PlayerControllerCore _ctrl;
         private IPlayerNetworkDriver _driver;
-
+    
         private float _nextClick;
         private bool _hasLastGoal;
         private Vector3 _lastGoal;
-
+    
         private int _uiLayer = -1;
         private static readonly List<RaycastResult> _uiHits = new List<RaycastResult>();
-
+    
         private bool _uiConsumeUntilUp;
-
-        public bool HasPath =>
-            _agent &&
-            _agent.enabled &&
-            _agent.isOnNavMesh &&
-            _agent.hasPath &&
-            !_agent.isStopped;
-
+    
+        public bool HasPath => _agent && _agent.hasPath && !_agent.isStopped;
+    
         void Awake()
         {
             if (!cam)
                 cam = Camera.main;
-
+    
             _agent = GetComponent<NavMeshAgent>();
             _ctrl = GetComponent<PlayerControllerCore>();
             CacheNetworkDriver();
-
-            // NavMeshAgent usato solo per pathfinding/steering.
-            // Il movimento effettivo è gestito da PlayerControllerCore / Rigidbody.
+    
+            // Il NavMeshAgent è usato solo per pathfinding/steering.
+            // Il movimento reale è gestito da PlayerControllerCore / Rigidbody.
             _agent.updatePosition = false;
             _agent.updateRotation = false;
             _agent.autoRepath = true;
@@ -70,22 +65,22 @@ namespace Game.Networking.Adapters
             _agent.avoidancePriority = 50;
             _agent.stoppingDistance = Mathf.Max(0.15f, _agent.stoppingDistance);
         }
-
+    
         void OnEnable()
         {
             if (_driver == null)
                 CacheNetworkDriver();
         }
-
+    
         void LateUpdate()
         {
             if (!cam)
                 cam = Camera.main;
-
+    
             if (_uiLayer == -1 && !string.IsNullOrEmpty(uiLayerName))
                 _uiLayer = LayerMask.NameToLayer(uiLayerName);
         }
-
+    
         void CacheNetworkDriver()
         {
             _driver = null;
@@ -99,79 +94,75 @@ namespace Game.Networking.Adapters
                 }
             }
         }
-
+    
         bool HasLocalAuthorityForInput()
         {
             if (_driver != null)
                 return _driver.HasInputAuthority(allowServerOnlyInput);
-
-            // Se non c’è driver, non blocchiamo input lato client.
+    
+            // Fallback: se non c'è driver, non blocchiamo l’input.
             return true;
         }
-
+    
         void Update()
         {
             if (!HasLocalAuthorityForInput())
                 return;
             if (!cam)
                 return;
-
-            // Se l’ultimo click è stato consumato dalla UI, sblocca al rilascio.
+    
+            // Se il precedente click è stato consumato dalla UI, sblocca al rilascio
             if (_uiConsumeUntilUp && Input.GetMouseButtonUp(clickButton))
                 _uiConsumeUntilUp = false;
-
+    
             bool bypass = allowBypassKey && Input.GetKey(bypassKey);
-
+    
             if (Input.GetMouseButtonDown(clickButton))
             {
-                // In consume-UI e non bypasso → ignora.
+                // Se in stato consume-UI e non bypasso, ignora
                 if (_uiConsumeUntilUp && !bypass)
                     return;
-
-                // Blocca click sulla UI se non bypasso.
+    
+                // Blocca click su UI se non bypasso
                 if (!bypass && blockUIClicks && IsPointerOverUILayer())
                 {
                     _uiConsumeUntilUp = true;
                     return;
                 }
-
-                // Debounce anti-spam.
+    
+                // Debounce anti-spam
                 if (enableDebounce && Time.time < _nextClick)
                     return;
                 _nextClick = Time.time + clickCooldown;
-
-                // Raycast da camera.
+    
+                // Raycast da camera
                 Ray r = cam.ScreenPointToRay(Input.mousePosition);
                 if (!Physics.Raycast(r, out RaycastHit hit, 5000f, ~0, QueryTriggerInteraction.Ignore))
                     return;
-
-                // Proietta sul NavMesh.
+    
+                // Proietta sul NavMesh
                 if (!NavMesh.SamplePosition(hit.point, out NavMeshHit nh, maxSampleDist, NavMesh.AllAreas))
                     return;
-
-                // Evita micro-spostamenti inutili.
+    
+                // Evita micro-spostamenti inutili
                 if (enableMinRepathDistance && _hasLastGoal &&
                     Vector3.Distance(nh.position, _lastGoal) < minRepathDistance)
                     return;
-
-                // Evita click quasi sotto i piedi.
+    
+                // Evita click quasi sotto i piedi
                 if (Vector3.Distance(transform.position, nh.position) <= _agent.stoppingDistance + 0.05f)
                     return;
-
-                // Agente non valido? evita chiamate pericolose.
-                if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
-                    return;
-
-                // Imposta path.
+    
+                // Imposta path
                 _agent.isStopped = false;
                 _agent.ResetPath();
                 _agent.SetDestination(nh.position);
-
+    
                 _lastGoal = nh.position;
                 _hasLastGoal = true;
             }
         }
-
+    
         bool IsPointerOverUILayer()
         {
             if (!blockUIClicks)
@@ -180,96 +171,81 @@ namespace Game.Networking.Adapters
                 return false;
             if (_uiLayer == -1)
                 return false;
-
+    
             var ped = new PointerEventData(EventSystem.current)
             {
                 position = Input.mousePosition
             };
-
+    
             _uiHits.Clear();
             EventSystem.current.RaycastAll(ped, _uiHits);
-
+    
             for (int i = 0; i < _uiHits.Count; i++)
             {
                 var go = _uiHits[i].gameObject;
                 if (!go)
                     continue;
-
+    
                 Transform t = go.transform;
                 while (t != null)
                 {
                     if (t.gameObject.layer == _uiLayer)
                         return true;
+    
                     t = t.parent;
                 }
             }
-
+    
             return false;
         }
-
+    
         // --- API usate da PlayerControllerCore / server ---
-
+    
         public void CancelPath()
         {
-            if (_agent == null)
+            if (!_agent)
                 return;
-
-            // Durante shutdown o se l'agente non è più su NavMesh, NON chiamare Stop/ResetPath.
-            if (!_agent.enabled || !_agent.isOnNavMesh)
-            {
-                _hasLastGoal = false;
-                return;
-            }
-
+    
             _agent.isStopped = true;
             if (_agent.hasPath)
                 _agent.ResetPath();
-
-            _agent.nextPosition = transform.position;
+    
             _hasLastGoal = false;
+            _agent.nextPosition = transform.position;
         }
-
+    
         public Vector3 GetDesiredVelocity()
         {
-            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
-                return Vector3.zero;
-
-            return _agent.desiredVelocity;
+            return _agent ? _agent.desiredVelocity : Vector3.zero;
         }
-
+    
         public float RemainingDistance()
         {
-            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
-                return Mathf.Infinity;
-
-            return _agent.remainingDistance;
+            return _agent ? _agent.remainingDistance : Mathf.Infinity;
         }
-
+    
         public float StoppingDistance => _agent ? _agent.stoppingDistance : 0.15f;
-
+    
         public Vector3 SteeringTarget()
         {
-            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
-                return transform.position;
-
-            return _agent.steeringTarget;
+            return _agent ? _agent.steeringTarget : transform.position;
         }
-
+    
         public void SyncAgentToTransform()
         {
-            if (_agent && _agent.enabled && _agent.isOnNavMesh)
+            if (_agent)
                 _agent.nextPosition = transform.position;
         }
-
+    
         public Vector3[] GetPathCorners()
         {
-            if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh || !_agent.hasPath)
+            if (!_agent || !_agent.hasPath)
                 return System.Array.Empty<Vector3>();
-
+    
             var p = _agent.path;
             if (p == null)
                 return System.Array.Empty<Vector3>();
-
+    
             return p.corners;
         }
     }
