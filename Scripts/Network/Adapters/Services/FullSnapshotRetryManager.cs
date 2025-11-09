@@ -25,10 +25,10 @@ namespace Game.Networking.Adapters
         bool IsEmpty { get; }
         void RecordPayload(NetworkConnection conn, byte[] payload, double now);
         void RecordShards(NetworkConnection conn, List<byte[]> shards, double now);
+        IEnumerable<NetworkConnection> EnumerateConnections();
         bool TryGetRecord(NetworkConnection conn, out FullSnapshotRetryRecord record);
         void MarkSent(NetworkConnection conn, double now);
         void Clear(NetworkConnection conn);
-        void CollectDue(double now, double retryIntervalSeconds, int maxRetries, IList<NetworkConnection> results);
     }
 
     public sealed class DefaultFullSnapshotRetryManager : IFullSnapshotRetryManager
@@ -60,6 +60,8 @@ namespace Game.Networking.Adapters
             _lastSent[conn] = now;
             _retryCounts[conn] = 0;
         }
+
+        public IEnumerable<NetworkConnection> EnumerateConnections() => _lastSent.Keys;
 
         public bool TryGetRecord(NetworkConnection conn, out FullSnapshotRetryRecord record)
         {
@@ -93,31 +95,6 @@ namespace Game.Networking.Adapters
             _shards.Remove(conn);
             _lastSent.Remove(conn);
             _retryCounts.Remove(conn);
-        }
-
-        public void CollectDue(double now, double retryIntervalSeconds, int maxRetries, IList<NetworkConnection> results)
-        {
-            if (results == null)
-                return;
-
-            results.Clear();
-
-            foreach (var kv in _lastSent)
-            {
-                var conn = kv.Key;
-                if (conn == null || !conn.IsActive)
-                    continue;
-
-                if (!_retryCounts.TryGetValue(conn, out int retryCount))
-                    retryCount = 0;
-
-                if (maxRetries > 0 && retryCount >= maxRetries)
-                    continue;
-
-                double elapsed = now - kv.Value;
-                if (elapsed >= retryIntervalSeconds)
-                    results.Add(conn);
-            }
         }
     }
 }

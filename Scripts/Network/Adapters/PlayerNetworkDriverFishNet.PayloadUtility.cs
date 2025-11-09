@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using FishNet.Connection;
@@ -106,21 +106,13 @@ namespace Game.Networking.Adapters
                 int parityCount = fecParityShards;
                 int dataShards = Math.Max(1, totalShards - parityCount);
 
-                if (_fecService.TryRecover(list, parityCount, dataShards, fecShardSize, _fecRecoveryScratch))
+                if (_fecService.TryRecover(list, parityCount, dataShards, fecShardSize, out var recoveredShard))
                 {
-                    foreach (var shardInfo in _fecRecoveryScratch)
-                    {
-                        if (shardInfo == null)
-                            continue;
-                        if (shardInfo.Index < list.Count)
-                            list[shardInfo.Index] = shardInfo;
-                    }
-                    _fecRecoveryScratch.Clear();
+                    list[recoveredShard.Index] = recoveredShard;
                     _telemetry?.Increment("pack.shards_recovered");
                 }
                 else
                 {
-                    _fecRecoveryScratch.Clear();
                     // Not enough info to reconstruct, wait for more shards
                     return;
                 }
@@ -227,7 +219,7 @@ namespace Game.Networking.Adapters
         void HandlePackedPayload(byte[] payload, ulong serverStateHash)
         {
             MovementSnapshot snap;
-            int cs = _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE;
+            int cs = _chunk ? _chunk.cellSize : 128;
     
             if (!PackedMovement.TryUnpack(payload, cs,
                     ref _haveAnchor, ref _anchorCellX, ref _anchorCellY,
@@ -240,46 +232,45 @@ namespace Game.Networking.Adapters
                 return;
             }
     
-            var buffer = _remoteState.Buffer;
-
-            if (buffer.Count == 0 || snap.serverTime >= buffer[buffer.Count - 1].serverTime)
+            // ordered insert by serverTime
+            if (_buffer.Count == 0 || snap.serverTime >= _buffer[_buffer.Count - 1].serverTime)
             {
-                buffer.Add(snap);
+                _buffer.Add(snap);
             }
             else
             {
-                for (int i = 0; i < buffer.Count; i++)
+                for (int i = 0; i < _buffer.Count; i++)
                 {
-                    if (snap.serverTime < buffer[i].serverTime)
+                    if (snap.serverTime < _buffer[i].serverTime)
                     {
-                        buffer.Insert(i, snap);
+                        _buffer.Insert(i, snap);
                         break;
                     }
                 }
             }
-
-            if (buffer.Count > 256)
-                buffer.RemoveAt(0);
-
+    
+            if (_buffer.Count > 256)
+                _buffer.RemoveAt(0);
+    
             double now = _netTime.Now();
             double delay = Math.Max(0.0, now - snap.serverTime);
-
-            _remoteState.EmaDelay = (_remoteState.EmaDelay <= 0.0)
+    
+            _emaDelay = (_emaDelay <= 0.0)
                 ? delay
-                : (1.0 - emaDelayA) * _remoteState.EmaDelay + emaDelayA * delay;
-
-            double dev = Math.Abs(delay - _remoteState.EmaDelay);
-
-            _remoteState.EmaJitter = (_remoteState.EmaJitter <= 0.0)
+                : (1.0 - emaDelayA) * _emaDelay + emaDelayA * delay;
+    
+            double dev = Math.Abs(delay - _emaDelay);
+    
+            _emaJitter = (_emaJitter <= 0.0)
                 ? dev
-                : (1.0 - emaJitterA) * _remoteState.EmaJitter + emaJitterA * dev;
-
-            _telemetry?.SetGauge($"client.{OwnerClientId}.buffer_size", buffer.Count);
-
-            double targetBack = _remoteState.EmaDelay * 1.35 + _remoteState.EmaJitter * 1.6;
-            _remoteState.BackTarget = ClampD(targetBack, minBack, maxBack);
-            if (_remoteState.Back <= 0.0)
-                _remoteState.Back = _remoteState.BackTarget;
+                : (1.0 - emaJitterA) * _emaJitter + emaJitterA * dev;
+    
+            _telemetry?.SetGauge($"client.{OwnerClientId}.buffer_size", _buffer.Count);
+    
+            double targetBack = _emaDelay * 1.35 + _emaJitter * 1.6;
+            _backTarget = ClampD(targetBack, minBack, maxBack);
+            if (_back <= 0.0)
+                _back = _backTarget;
     
             ulong clientHash = ComputeStateHashForSnapshot(snap);
             if (clientHash != serverStateHash)
@@ -331,7 +322,7 @@ namespace Game.Networking.Adapters
             var snap = new MovementSnapshot(pos, vel, now, seq, anim);
             byte[] full = PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                0, 0, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE);
+                0, 0, _chunk ? _chunk.cellSize : 128);
     
             ulong stateHash = ComputeStateHashForSnapshot(snap);
     
@@ -465,45 +456,43 @@ namespace Game.Networking.Adapters
         {
             A = default;
             B = default;
-
-            var buffer = _remoteState.Buffer;
-            int n = buffer.Count;
+    
+            int n = _buffer.Count;
             if (n < 2)
                 return false;
-
+    
             int r = -1;
             for (int i = 0; i < n; i++)
             {
-                if (buffer[i].serverTime > renderT)
+                if (_buffer[i].serverTime > renderT)
                 {
                     r = i;
                     break;
                 }
             }
-
+    
             if (r <= 0)
                 return false;
-
-            A = buffer[r - 1];
-            B = buffer[r];
+    
+            A = _buffer[r - 1];
+            B = _buffer[r];
             return true;
         }
-
+    
         void CleanupOld(double cutoff)
         {
-            var buffer = _remoteState.Buffer;
             int removeCount = 0;
-
-            for (int i = 0; i < buffer.Count; i++)
+    
+            for (int i = 0; i < _buffer.Count; i++)
             {
-                if (buffer[i].serverTime < cutoff)
+                if (_buffer[i].serverTime < cutoff)
                     removeCount++;
                 else
                     break;
             }
-
-            if (removeCount > 0 && buffer.Count - removeCount >= 2)
-                buffer.RemoveRange(0, removeCount);
+    
+            if (removeCount > 0 && _buffer.Count - removeCount >= 2)
+                _buffer.RemoveRange(0, removeCount);
         }
     
         static double ClampD(double v, double min, double max)

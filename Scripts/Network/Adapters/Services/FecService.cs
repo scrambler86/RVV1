@@ -6,312 +6,134 @@ namespace Game.Networking.Adapters
     public interface IFecService
     {
         List<byte[]> BuildShards(byte[] payload, int shardSize, int parityCount);
-        bool TryRecover(IList<ShardInfo> shards,
-                        int parityCount,
-                        int dataShards,
-                        int shardPadSize,
-                        IList<ShardInfo> recovered);
+        bool TryRecover(IList<ShardInfo> shards, int parityCount, int dataShards, int shardPadSize, out ShardInfo recovered);
     }
 
-    public sealed class ReedSolomonFecService : IFecService
+    /// <summary>
+    /// Default XOR-based FEC implementation (single missing data shard recovery).
+    /// </summary>
+    public sealed class DefaultFecService : IFecService
     {
-        const int FIELD_SIZE = 256;
-        const int GENERATOR = 0x11D;
-        static readonly byte[] s_Exp = new byte[FIELD_SIZE * 2];
-        static readonly byte[] s_Log = new byte[FIELD_SIZE];
-        static bool s_Initialized;
-
-        static void EnsureTables()
-        {
-            if (s_Initialized)
-                return;
-
-            byte x = 1;
-            for (int i = 0; i < FIELD_SIZE - 1; i++)
-            {
-                s_Exp[i] = x;
-                s_Log[x] = (byte)i;
-                x = (byte)(x << 1);
-                if ((x & 0x100) != 0)
-                    x ^= GENERATOR;
-            }
-
-            for (int i = FIELD_SIZE - 1; i < s_Exp.Length; i++)
-                s_Exp[i] = s_Exp[i - (FIELD_SIZE - 1)];
-
-            s_Initialized = true;
-        }
-
-        static byte GfMul(byte a, byte b)
-        {
-            if (a == 0 || b == 0)
-                return 0;
-
-            int idx = s_Log[a] + s_Log[b];
-            return s_Exp[idx];
-        }
-
-        static byte GfDiv(byte a, byte b)
-        {
-            if (a == 0)
-                return 0;
-            if (b == 0)
-                throw new DivideByZeroException();
-
-            int idx = s_Log[a] - s_Log[b];
-            if (idx < 0)
-                idx += FIELD_SIZE - 1;
-            return s_Exp[idx];
-        }
-
-        static byte GfPow(byte a, int power)
-        {
-            if (power == 0)
-                return 1;
-            if (a == 0)
-                return 0;
-
-            int idx = (s_Log[a] * power) % (FIELD_SIZE - 1);
-            if (idx < 0)
-                idx += FIELD_SIZE - 1;
-            return s_Exp[idx];
-        }
-
-        static void CopyPadded(byte[] source, byte[] dest)
-        {
-            Array.Clear(dest, 0, dest.Length);
-            if (source == null)
-                return;
-            Array.Copy(source, 0, dest, 0, Math.Min(source.Length, dest.Length));
-        }
-
         public List<byte[]> BuildShards(byte[] payload, int shardSize, int parityCount)
         {
-            EnsureTables();
-
             var shards = new List<byte[]>();
             if (payload == null || payload.Length == 0)
                 return shards;
 
-            int effectiveShardSize = Math.Max(1, Math.Min(shardSize <= 0 ? payload.Length : shardSize, payload.Length));
+            int effectiveShardSize = Math.Max(1, Math.Min(shardSize, payload.Length));
             int dataShards = (payload.Length + effectiveShardSize - 1) / effectiveShardSize;
             int totalShards = dataShards + Math.Max(0, parityCount);
-
-            var paddedData = new byte[dataShards][];
 
             for (int i = 0; i < dataShards; i++)
             {
                 int start = i * effectiveShardSize;
                 int len = Math.Min(effectiveShardSize, payload.Length - start);
+
                 byte[] shard = new byte[2 + 2 + 4 + len];
                 Array.Copy(BitConverter.GetBytes((ushort)totalShards), 0, shard, 0, 2);
                 Array.Copy(BitConverter.GetBytes((ushort)i), 0, shard, 2, 2);
                 Array.Copy(BitConverter.GetBytes((uint)len), 0, shard, 4, 4);
                 Array.Copy(payload, start, shard, 8, len);
-                shards.Add(shard);
 
-                paddedData[i] = new byte[effectiveShardSize];
-                Array.Copy(payload, start, paddedData[i], 0, len);
+                shards.Add(shard);
             }
 
             for (int p = 0; p < parityCount; p++)
             {
-                byte[] parity = new byte[effectiveShardSize];
-                byte alpha = (byte)(p + 2);
+                int maxLen = effectiveShardSize;
+                byte[] parityPayload = new byte[maxLen];
 
-                for (int j = 0; j < dataShards; j++)
+                for (int i = 0; i < dataShards; i++)
                 {
-                    byte coeff = GfPow(alpha, j);
-                    var data = paddedData[j];
-                    for (int b = 0; b < effectiveShardSize; b++)
+                    int dsLen = shards[i].Length - 8;
+                    for (int b = 0; b < maxLen; b++)
                     {
-                        parity[b] ^= GfMul(coeff, data[b]);
+                        byte vb = 0;
+                        if (b < dsLen)
+                            vb = shards[i][8 + b];
+
+                        parityPayload[b] ^= vb;
                     }
                 }
 
-                byte[] shard = new byte[2 + 2 + 4 + effectiveShardSize];
-                Array.Copy(BitConverter.GetBytes((ushort)totalShards), 0, shard, 0, 2);
-                Array.Copy(BitConverter.GetBytes((ushort)(dataShards + p)), 0, shard, 2, 2);
-                Array.Copy(BitConverter.GetBytes((uint)effectiveShardSize), 0, shard, 4, 4);
-                Array.Copy(parity, 0, shard, 8, effectiveShardSize);
-                shards.Add(shard);
+                byte[] parityShard = new byte[2 + 2 + 4 + maxLen];
+                Array.Copy(BitConverter.GetBytes((ushort)totalShards), 0, parityShard, 0, 2);
+                Array.Copy(BitConverter.GetBytes((ushort)(dataShards + p)), 0, parityShard, 2, 2);
+                Array.Copy(BitConverter.GetBytes((uint)maxLen), 0, parityShard, 4, 4);
+                Array.Copy(parityPayload, 0, parityShard, 8, maxLen);
+
+                shards.Add(parityShard);
             }
 
             return shards;
         }
 
-        public bool TryRecover(IList<ShardInfo> shards,
-                               int parityCount,
-                               int dataShards,
-                               int shardPadSize,
-                               IList<ShardInfo> recovered)
+        public bool TryRecover(IList<ShardInfo> shards, int parityCount, int dataShards, int shardPadSize, out ShardInfo recovered)
         {
-            EnsureTables();
-
-            recovered?.Clear();
-
-            if (parityCount <= 0 || shards == null || recovered == null)
+            recovered = null;
+            if (parityCount <= 0 || shards == null)
                 return false;
 
-            var missing = new List<int>();
-            for (int i = 0; i < dataShards && i < shards.Count; i++)
+            int totalShards = shards.Count;
+            int missingCount = 0;
+            int missingDataIdx = -1;
+
+            for (int i = 0; i < dataShards && i < totalShards; i++)
             {
                 if (shards[i] == null)
-                    missing.Add(i);
+                {
+                    missingDataIdx = i;
+                    missingCount++;
+                }
             }
 
-            if (missing.Count == 0)
+            if (missingCount != 1)
                 return false;
 
-            if (missing.Count > parityCount)
-                return false;
-
-            var parityRows = new List<ShardInfo>();
-            for (int i = dataShards; i < shards.Count && parityRows.Count < missing.Count; i++)
+            byte[][] padded = new byte[totalShards][];
+            for (int i = 0; i < totalShards; i++)
             {
-                if (shards[i] != null)
-                    parityRows.Add(shards[i]);
+                var sInfo = shards[i];
+                padded[i] = new byte[shardPadSize];
+
+                if (sInfo != null && sInfo.Data != null)
+                    Array.Copy(sInfo.Data, 0, padded[i], 0, Math.Min(sInfo.DataLength, shardPadSize));
             }
 
-            if (parityRows.Count < missing.Count)
-                return false;
-
-            int n = missing.Count;
-            byte[,] matrix = new byte[n, n];
-            byte[,] inverse = new byte[n, n];
-            byte[][] rhs = new byte[n][];
-            byte[][] knownData = new byte[dataShards][];
-
-            for (int i = 0; i < dataShards; i++)
+            byte[] recoveredBytes = new byte[shardPadSize];
+            for (int s = 0; s < totalShards; s++)
             {
-                knownData[i] = new byte[shardPadSize];
-                if (shards.Count > i && shards[i] != null)
-                    CopyPadded(shards[i].Data, knownData[i]);
+                var block = padded[s];
+                for (int b = 0; b < shardPadSize; b++)
+                    recoveredBytes[b] ^= block[b];
             }
 
-            for (int r = 0; r < n; r++)
+            int recoveredDataLen = shardPadSize;
+            if (missingDataIdx == dataShards - 1)
             {
-                byte alpha = (byte)(r + 2);
-                var parity = parityRows[r];
-                rhs[r] = new byte[shardPadSize];
-                CopyPadded(parity.Data, rhs[r]);
-
-                for (int c = 0; c < n; c++)
+                int sumPrev = 0;
+                for (int i = 0; i < missingDataIdx; i++)
                 {
-                    int missingIdx = missing[c];
-                    matrix[r, c] = GfPow(alpha, missingIdx);
+                    var info = shards[i];
+                    if (info != null)
+                        sumPrev += info.DataLength;
                 }
 
-                for (int dataIdx = 0; dataIdx < dataShards; dataIdx++)
-                {
-                    if (missing.Contains(dataIdx))
-                        continue;
-
-                    byte coeff = GfPow(alpha, dataIdx);
-                    var known = knownData[dataIdx];
-                    for (int b = 0; b < shardPadSize; b++)
-                    {
-                        byte term = GfMul(coeff, known[b]);
-                        rhs[r][b] ^= term;
-                    }
-                }
-
-                for (int c = 0; c < n; c++)
-                    inverse[r, c] = (byte)(r == c ? 1 : 0);
+                recoveredDataLen = Math.Min(recoveredDataLen, shardPadSize);
             }
 
-            if (!InvertMatrix(matrix, inverse, n))
-                return false;
+            byte[] recoveredData = new byte[recoveredDataLen];
+            Array.Copy(recoveredBytes, 0, recoveredData, 0, recoveredDataLen);
 
-            for (int m = 0; m < n; m++)
+            recovered = new ShardInfo
             {
-                byte[] solved = new byte[shardPadSize];
-                for (int r = 0; r < n; r++)
-                {
-                    byte coeff = inverse[m, r];
-                    if (coeff == 0)
-                        continue;
-                    for (int b = 0; b < shardPadSize; b++)
-                        solved[b] ^= GfMul(coeff, rhs[r][b]);
-                }
-
-                int shardIndex = missing[m];
-                int dataLength = shardPadSize;
-                if (shardIndex < shards.Count && shards[shardIndex] != null)
-                    dataLength = shards[shardIndex].DataLength;
-
-                recovered.Add(new ShardInfo
-                {
-                    Total = (ushort)shards.Count,
-                    Index = (ushort)shardIndex,
-                    DataLength = dataLength,
-                    Data = solved
-                });
-            }
-
-            return recovered.Count > 0;
-        }
-
-        static bool InvertMatrix(byte[,] matrix, byte[,] inverse, int n)
-        {
-            for (int col = 0; col < n; col++)
-            {
-                int pivot = col;
-                for (int row = col; row < n; row++)
-                {
-                    if (matrix[row, col] != 0)
-                    {
-                        pivot = row;
-                        break;
-                    }
-                }
-
-                if (matrix[pivot, col] == 0)
-                    return false;
-
-                if (pivot != col)
-                {
-                    SwapRows(matrix, col, pivot, n);
-                    SwapRows(inverse, col, pivot, n);
-                }
-
-                byte pivotVal = matrix[col, col];
-                byte invPivot = GfDiv(1, pivotVal);
-
-                for (int j = 0; j < n; j++)
-                {
-                    matrix[col, j] = GfMul(matrix[col, j], invPivot);
-                    inverse[col, j] = GfMul(inverse[col, j], invPivot);
-                }
-
-                for (int row = 0; row < n; row++)
-                {
-                    if (row == col)
-                        continue;
-
-                    byte factor = matrix[row, col];
-                    if (factor == 0)
-                        continue;
-
-                    for (int j = 0; j < n; j++)
-                    {
-                        matrix[row, j] ^= GfMul(factor, matrix[col, j]);
-                        inverse[row, j] ^= GfMul(factor, inverse[col, j]);
-                    }
-                }
-            }
+                Total = (ushort)totalShards,
+                Index = (ushort)missingDataIdx,
+                DataLength = recoveredDataLen,
+                Data = recoveredData
+            };
 
             return true;
-        }
-
-        static void SwapRows(byte[,] matrix, int a, int b, int n)
-        {
-            for (int i = 0; i < n; i++)
-            {
-                byte tmp = matrix[a, i];
-                matrix[a, i] = matrix[b, i];
-                matrix[b, i] = tmp;
-            }
         }
     }
 }

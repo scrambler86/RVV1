@@ -5,6 +5,7 @@ using FishNet.Connection;
 using FishNet.Object;
 using UnityEngine;
 using UnityEngine.AI;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
@@ -36,7 +37,7 @@ namespace Game.Networking.Adapters
         /// Server-side integrazione movimento (authoritative).
         /// Usa solo dir e speed; non si fida della posizione grezza del client.
         /// </summary>
-        Vector3 IntegrateServerMovement(Vector3 startPos, Vector3 dir, bool running, float dt, Vector3 clientPredicted)
+        Vector3 IntegrateServerMovement(Vector3 startPos, Vector3 dir, bool running, float dt)
         {
             if (dt <= 0f)
                 return startPos;
@@ -51,17 +52,15 @@ namespace Game.Networking.Adapters
 
             Vector3 result = startPos + new Vector3(step.x, 0f, step.z);
 
-            bool hasVerticalIntent = elevationPolicy == ElevationPolicyMode.PreserveNetwork || Mathf.Abs(dir.y) > 0.0001f;
-            if (hasVerticalIntent)
+            bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
+            if (hasVerticalInput)
                 result.y = startPos.y + dir.y * speed * dt;
+            else if (_core != null)
+                result.y = _core.SampleGroundY(result);
+            else
+                result.y = startPos.y;
 
-            Func<Vector3, float> sampler = (_core != null) ? new Func<Vector3, float>(_core.SampleGroundY) : null;
-            return _elevationPolicy.ResolveServer(
-                result,
-                clientPredicted,
-                sampler,
-                elevationPolicy,
-                hasVerticalIntent);
+            return result;
         }
     
         // ---------- FEC suppression (per-connection) ----------
@@ -110,7 +109,6 @@ namespace Game.Networking.Adapters
                 return;
 
             EnsureServices();
-            EnsureOwnerRuntime();
 
             double now = _netTime.Now();
             if (!RateLimitOk(now))
@@ -128,7 +126,7 @@ namespace Game.Networking.Adapters
             Vector3 predictedPos = clientPredictedPos;
     
             // Integrazione authoritative lato server
-            Vector3 serverIntegratedPos = IntegrateServerMovement(_serverLastPos, dir, running, dtF, predictedPos);
+            Vector3 serverIntegratedPos = IntegrateServerMovement(_serverLastPos, dir, running, dtF);
             _telemetry?.Observe(
                 $"client.{OwnerClientId}.predicted_vs_integrated_cm",
                 Vector3.Distance(serverIntegratedPos, clientPredictedPos) * 100.0);
@@ -152,18 +150,10 @@ namespace Game.Networking.Adapters
             bool ok = true;
             if (_anti != null)
             {
-                var context = new AntiCheatInputContext(
-                    this,
-                    seq,
-                    timestamp,
-                    predictedPos,
-                    _serverLastPos,
-                    maxStep,
-                    pathCorners,
-                    running,
-                    dtF);
-
-                ok = _anti.ValidateInput(in context);
+                if (_anti is AntiCheatManager acm)
+                    ok = acm.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running, dtF);
+                else
+                    ok = _anti.ValidateInput(this, seq, timestamp, predictedPos, _serverLastPos, maxStep, pathCorners, running);
             }
     
             if (!ok)
@@ -188,14 +178,10 @@ namespace Game.Networking.Adapters
     
                 int sampleCount = 0;
                 var inpList = new List<string>();
-                var ownerInputs = _ownerRuntime?.InputBuffer;
-                if (ownerInputs != null)
+                foreach (var inp in _inputBuf)
                 {
-                    foreach (var inp in ownerInputs)
-                    {
-                        if (sampleCount++ >= 6) break;
-                        inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
-                    }
+                    if (sampleCount++ >= 6) break;
+                    inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
                 }
                 if (inpList.Count > 0)
                     tags["input_sample"] = string.Join("|", inpList);
@@ -240,41 +226,38 @@ namespace Game.Networking.Adapters
             }
     
             // ---------- NavMesh + velocità ----------
-            bool hasVerticalIntent = elevationPolicy == ElevationPolicyMode.PreserveNetwork || Mathf.Abs(dir.y) > 0.0001f;
+            bool hasVerticalInput = !ignoreNetworkY && Mathf.Abs(dir.y) > 0.0001f;
 
             Vector3 finalPos = ok ? serverIntegratedPos : predictedPos;
 
-            Func<Vector3, float> sampler = (_core != null) ? new Func<Vector3, float>(_core.SampleGroundY) : null;
-            finalPos = _elevationPolicy.ResolveServer(
-                finalPos,
-                predictedPos,
-                sampler,
-                elevationPolicy,
-                hasVerticalIntent);
+            if (!hasVerticalInput && _core != null)
+            {
+                float sampleY = _core.SampleGroundY(finalPos);
+                finalPos.y = sampleY;
+            }
 
             if (validateNavMesh &&
                 NavMesh.SamplePosition(finalPos, out var nh, navMeshMaxSampleDist, NavMesh.AllAreas))
             {
-                finalPos = _elevationPolicy.ResolveServer(
-                    nh.position,
-                    predictedPos,
-                    sampler,
-                    elevationPolicy,
-                    hasVerticalIntent);
+                finalPos = nh.position;
+                if (!hasVerticalInput && _core != null)
+                {
+                    float sampleY = _core.SampleGroundY(finalPos);
+                    finalPos.y = sampleY;
+                }
             }
     
             Vector3 deltaPos = finalPos - _serverLastPos;
             Vector3 vel = deltaPos / dtF;
     
             // Clamp verticale
-            if (Mathf.Abs(vel.y) > maxVerticalSpeed && elevationPolicy == ElevationPolicyMode.GroundSnap)
+            if (Mathf.Abs(vel.y) > maxVerticalSpeed)
             {
                 finalPos.y = _serverLastPos.y;
                 deltaPos = finalPos - _serverLastPos;
                 vel = deltaPos / dtF;
             }
-            if (elevationPolicy == ElevationPolicyMode.GroundSnap)
-                vel.y = 0f;
+            vel.y = 0f;
     
             // Aggiorna stato server authoritative
             Vector3 oldServerLast = _serverLastPos;
@@ -319,7 +302,7 @@ namespace Game.Networking.Adapters
                         cellY = (short)ccell.y;
                     }
 
-                    cellSize = _chunk.CellSize;
+                    cellSize = _chunk.cellSize;
                 }
 
                 byte[] full = PackedMovement.PackFull(
@@ -457,7 +440,9 @@ namespace Game.Networking.Adapters
                     { "offset_ms", offsetMs }
                 });
     
-            _clockSync?.RecordSample(rttMs, offsetMs);
+            var csm = GetComponentInChildren<ClockSyncManager>();
+            if (csm != null)
+                csm.RecordSample(rttMs, offsetMs);
         }
     
         public double GetEstimatedClientToServerOffsetSeconds()
@@ -514,13 +499,13 @@ namespace Game.Networking.Adapters
         byte[] PackFullForObservers(MovementSnapshot snap)
         {
             short cx = 0, cy = 0;
-            if (_chunk != null && Owner != null && _chunk.TryGetCellOf(Owner, out var cell))
+            if (_chunk && Owner != null && _chunk.TryGetCellOf(Owner, out var cell))
             {
                 cx = (short)cell.x;
                 cy = (short)cell.y;
             }
-
-            int cs = _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE;
+    
+            int cs = _chunk ? _chunk.cellSize : 128;
             return PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime,
                 snap.seq, cx, cy, cs);
@@ -564,7 +549,7 @@ namespace Game.Networking.Adapters
                 payload = PackedMovement.PackDelta(
                     in lastSnapLocal,
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE,
+                    cellX, cellY, _chunk.cellSize,
                     maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
     
                 if (payload == null)
@@ -578,7 +563,7 @@ namespace Game.Networking.Adapters
             {
                 payload = PackedMovement.PackFull(
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE);
+                    cellX, cellY, _chunk.cellSize);
     
                 _sinceKeyframe[conn] = 0;
     
@@ -633,7 +618,7 @@ namespace Game.Networking.Adapters
                 byte[] deltaPayload = PackedMovement.PackDelta(
                     in lastSnapLocal,
                     snap.pos, snap.vel, snap.animState, snap.serverTime, snap.seq,
-                    cellX, cellY, _chunk != null ? _chunk.CellSize : DEFAULT_CHUNK_CELL_SIZE,
+                    cellX, cellY, _chunk.cellSize,
                     maxPosDeltaCm, maxVelDeltaCms, maxDtMs);
     
                 byte[] deltaEnv = CreateEnvelopeBytes(deltaPayload);

@@ -1,5 +1,6 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEngine.AI;
+using Game.Networking.Adapters;
 
 [RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(Collider))]
@@ -37,7 +38,7 @@ public class PlayerControllerCore : MonoBehaviour
 
     [Header("State / Gating")]
     public bool canMove = true;
-    public bool useDeterministicPlanar = false; // hook futuro
+    public bool useDeterministicPlanar = false;
 
     Rigidbody _rb;
     Collider _col;
@@ -53,7 +54,6 @@ public class PlayerControllerCore : MonoBehaviour
     float _lastPlanarSpeed;
     RaycastHit[] _groundBuffer;
 
-    // evita di ruotare il root (che trascina la camera) se non abbiamo un visual child separato
     bool _canRotateVisualRoot = true;
 
     public bool IsRunning => _runToggle;
@@ -77,12 +77,14 @@ public class PlayerControllerCore : MonoBehaviour
         if (_anim) _anim.applyRootMotion = false;
         CacheAnimParams();
 
+        // physics sane defaults
         _rb.isKinematic = false;
         _rb.detectCollisions = true;
         _rb.interpolation = RigidbodyInterpolation.Interpolate;
-        _rb.constraints = RigidbodyConstraints.FreezeRotationX |
-                          RigidbodyConstraints.FreezeRotationY |
-                          RigidbodyConstraints.FreezeRotationZ;
+        _rb.constraints =
+            RigidbodyConstraints.FreezeRotationX |
+            RigidbodyConstraints.FreezeRotationY |
+            RigidbodyConstraints.FreezeRotationZ;
 
         if (_agent != null)
         {
@@ -99,22 +101,25 @@ public class PlayerControllerCore : MonoBehaviour
         if (!visualRoot && !string.IsNullOrWhiteSpace(visualChildName))
         {
             Transform t = transform.Find(visualChildName);
-            if (t) visualRoot = t;
+            if (t)
+                visualRoot = t;
         }
         if (!visualRoot)
             visualRoot = transform;
 
-        // <-- questa è la protezione anti-"mi gira tutta la mappa"
         _canRotateVisualRoot = (visualRoot != transform);
 
+        // Snap iniziale a terra
         Vector3 p = transform.position;
         p = SnapToGround(p);
-        _rb.position = p;
+
         if (_agent)
         {
             _agent.Warp(p);
             _agent.nextPosition = p;
         }
+
+        _rb.MovePosition(p);
 
         _lastMoveDir = Vector3.zero;
         _lastPlanarSpeed = 0f;
@@ -125,9 +130,12 @@ public class PlayerControllerCore : MonoBehaviour
         if (!mainCamera) mainCamera = Camera.main;
         if (!terrain) terrain = Terrain.activeTerrain;
 
-        // shift toggle run ON/OFF (tua logica originale)
-        if (_allowInput && (Input.GetKeyDown(KeyCode.LeftShift) || Input.GetKeyDown(KeyCode.RightShift)))
+        // Toggle run con Shift
+        if (_allowInput &&
+            (Input.GetKeyDown(KeyCode.LeftShift) || Input.GetKeyDown(KeyCode.RightShift)))
+        {
             _runToggle = !_runToggle;
+        }
     }
 
     void FixedUpdate()
@@ -135,7 +143,8 @@ public class PlayerControllerCore : MonoBehaviour
         if (!mainCamera) mainCamera = Camera.main;
         if (!terrain) terrain = Terrain.activeTerrain;
 
-        if (_agent) _agent.nextPosition = _rb.position;
+        if (_agent)
+            _agent.nextPosition = _rb.position;
 
         if (!_allowInput || !canMove)
         {
@@ -145,10 +154,12 @@ public class PlayerControllerCore : MonoBehaviour
 
         _ctm?.SyncAgentToTransform();
 
+        // Input WASD
         float hz = Input.GetAxisRaw("Horizontal");
         float vt = Input.GetAxisRaw("Vertical");
         if (Mathf.Abs(hz) < 0.2f) hz = 0f;
         if (Mathf.Abs(vt) < 0.2f) vt = 0f;
+
         Vector3 inputRaw = new Vector3(hz, 0f, vt);
         if (inputRaw.sqrMagnitude > 1f)
             inputRaw.Normalize();
@@ -159,6 +170,7 @@ public class PlayerControllerCore : MonoBehaviour
             Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.LeftArrow) ||
             Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.RightArrow);
 
+        // Se passo a WASD, interrompo path click-to-move
         if (wasdPressed && _ctm != null && _ctm.HasPath)
             _ctm.CancelPath();
 
@@ -176,9 +188,12 @@ public class PlayerControllerCore : MonoBehaviour
         }
 
         Vector3 desiredDir = Vector3.zero;
+
         if (usingCTM)
         {
-            Vector3 dv = _ctm.GetDesiredVelocity(); dv.y = 0f;
+            Vector3 dv = _ctm.GetDesiredVelocity();
+            dv.y = 0f;
+
             if (dv.sqrMagnitude > 0.0001f)
                 desiredDir = dv.normalized;
 
@@ -190,7 +205,8 @@ public class PlayerControllerCore : MonoBehaviour
             desiredDir = inputRaw;
             if (mainCamera)
             {
-                desiredDir = (Quaternion.Euler(0f, mainCamera.transform.eulerAngles.y, 0f) * desiredDir).normalized;
+                desiredDir = (Quaternion.Euler(0f, mainCamera.transform.eulerAngles.y, 0f) *
+                              desiredDir).normalized;
             }
         }
 
@@ -204,6 +220,7 @@ public class PlayerControllerCore : MonoBehaviour
 
         _lastMoveDir = desiredDir;
 
+        // Integrazione movimento
         Vector3 step = desiredDir * curSpeed * Time.fixedDeltaTime;
         Vector3 target = _rb.position + new Vector3(step.x, 0f, step.z);
         target = SnapToGround(target);
@@ -229,7 +246,8 @@ public class PlayerControllerCore : MonoBehaviour
         float animSpeed = Mathf.Min(planarSpeed, curSpeed);
 
         _rb.MovePosition(target);
-        if (_agent) _agent.nextPosition = target;
+        if (_agent)
+            _agent.nextPosition = target;
 
         if (_canRotateVisualRoot && visualRoot)
         {
@@ -237,15 +255,14 @@ public class PlayerControllerCore : MonoBehaviour
             visualRoot.rotation = Quaternion.Slerp(
                 visualRoot.rotation,
                 q,
-                Time.fixedDeltaTime * 12f
-            );
+                Time.fixedDeltaTime * 12f);
+
             if (forceUprightVisual)
             {
                 visualRoot.rotation = Quaternion.Euler(
                     0f,
                     visualRoot.eulerAngles.y,
-                    0f
-                );
+                    0f);
             }
         }
 
@@ -259,10 +276,12 @@ public class PlayerControllerCore : MonoBehaviour
     {
         float half = HalfHeight();
         Vector3 p = new Vector3(xzWorld.x, xzWorld.y, xzWorld.z);
+
         if (TryGetGround(p, out var gh))
             return gh.point.y + half;
         if (terrain)
             return terrain.SampleHeight(p) + terrain.transform.position.y + half;
+
         return p.y;
     }
 
@@ -278,7 +297,8 @@ public class PlayerControllerCore : MonoBehaviour
         else
             return p;
 
-        if (Mathf.Abs(targetY - p.y) < 0.01f)
+        // tolleranza leggermente più alta per evitare micro jitter
+        if (Mathf.Abs(targetY - p.y) < 0.03f)
             return p;
 
         p.y = targetY;
@@ -331,7 +351,8 @@ public class PlayerControllerCore : MonoBehaviour
         if (_ctm != null)
         {
             _ctm.CancelPath();
-            if (_agent) _agent.nextPosition = _rb.position;
+            if (_agent)
+                _agent.nextPosition = _rb.position;
         }
     }
 

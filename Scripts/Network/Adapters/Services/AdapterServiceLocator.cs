@@ -1,15 +1,15 @@
-using System;
+using UnityEngine;
+using Game.Network;
 
 namespace Game.Networking.Adapters
 {
-    public interface IAdapterServiceRegistry
+    public interface IAdapterServiceProvider
     {
-        INetTime GetNetTime();
-        IAntiCheatValidator GetAntiCheat();
-        IChunkInterest GetChunkInterest();
-        IClockSync GetClockSync(PlayerNetworkDriverFishNet driver);
-        IDriverTelemetry GetTelemetry();
-        IElevationPolicy GetElevationPolicy();
+        INetTime ResolveNetTime(PlayerNetworkDriverFishNet driver);
+        IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver);
+        ChunkManager ResolveChunkManager(PlayerNetworkDriverFishNet driver);
+        ClockSyncManager ResolveClockSync(PlayerNetworkDriverFishNet driver);
+        IDriverTelemetry ResolveTelemetry(PlayerNetworkDriverFishNet driver);
         ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver);
         IFecService CreateFecService(PlayerNetworkDriverFishNet driver);
         IShardRegistry CreateShardRegistry(PlayerNetworkDriverFishNet driver);
@@ -18,40 +18,58 @@ namespace Game.Networking.Adapters
 
     public static class AdapterServiceLocator
     {
-        sealed class DefaultAdapterServiceRegistry : IAdapterServiceRegistry
+        sealed class DefaultAdapterServiceProvider : IAdapterServiceProvider
         {
-            readonly INetTime _time = new NetTimeAdapter();
-            readonly IDriverTelemetry _telemetry = DriverTelemetry.Null;
-            readonly IElevationPolicy _elevation = ElevationPolicies.FlatGround;
+            readonly NetTimeAdapter _time = new();
 
-            public INetTime GetNetTime() => _time;
-            public IAntiCheatValidator GetAntiCheat() => NullAntiCheatValidator.Instance;
-            public IChunkInterest GetChunkInterest() => null;
-            public IClockSync GetClockSync(PlayerNetworkDriverFishNet driver) => null;
-            public IDriverTelemetry GetTelemetry() => _telemetry;
-            public IElevationPolicy GetElevationPolicy() => _elevation;
-            public ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver) => new DefaultSnapshotPackingService();
-            public IFecService CreateFecService(PlayerNetworkDriverFishNet driver) => new ReedSolomonFecService();
-            public IShardRegistry CreateShardRegistry(PlayerNetworkDriverFishNet driver) => new DefaultShardRegistry();
-            public IFullSnapshotRetryManager CreateRetryManager(PlayerNetworkDriverFishNet driver) => new DefaultFullSnapshotRetryManager();
+            public INetTime ResolveNetTime(PlayerNetworkDriverFishNet driver) => _time;
+
+            public IAntiCheatValidator ResolveAntiCheat(PlayerNetworkDriverFishNet driver) =>
+                Object.FindObjectOfType<AntiCheatManager>();
+
+            public ChunkManager ResolveChunkManager(PlayerNetworkDriverFishNet driver) =>
+                Object.FindObjectOfType<ChunkManager>();
+
+            public ClockSyncManager ResolveClockSync(PlayerNetworkDriverFishNet driver)
+            {
+                if (driver != null)
+                {
+                    var local = driver.GetComponentInChildren<ClockSyncManager>();
+                    if (local != null)
+                        return local;
+                }
+
+                return Object.FindObjectOfType<ClockSyncManager>();
+            }
+
+            public IDriverTelemetry ResolveTelemetry(PlayerNetworkDriverFishNet driver)
+            {
+                var telemetry = Object.FindObjectOfType<TelemetryManager>();
+                return DriverTelemetry.Create(telemetry);
+            }
+
+            public ISnapshotPackingService CreatePackingService(PlayerNetworkDriverFishNet driver) =>
+                new DefaultSnapshotPackingService();
+
+            public IFecService CreateFecService(PlayerNetworkDriverFishNet driver) =>
+                new DefaultFecService();
+
+            public IShardRegistry CreateShardRegistry(PlayerNetworkDriverFishNet driver) =>
+                new DefaultShardRegistry();
+
+            public IFullSnapshotRetryManager CreateRetryManager(PlayerNetworkDriverFishNet driver) =>
+                new DefaultFullSnapshotRetryManager();
         }
 
-        sealed class NullAntiCheatValidator : IAntiCheatValidator
+        static readonly IAdapterServiceProvider s_Default = new DefaultAdapterServiceProvider();
+        static IAdapterServiceProvider s_Current = s_Default;
+
+        public static IAdapterServiceProvider Provider => s_Current;
+        public static IAdapterServiceProvider DefaultProvider => s_Default;
+
+        public static void RegisterProvider(IAdapterServiceProvider provider)
         {
-            NullAntiCheatValidator() { }
-            public static NullAntiCheatValidator Instance { get; } = new NullAntiCheatValidator();
-            public bool ValidateInput(in AntiCheatInputContext context) => true;
-        }
-
-        static readonly IAdapterServiceRegistry s_Default = new DefaultAdapterServiceRegistry();
-        static IAdapterServiceRegistry s_Current = s_Default;
-
-        public static IAdapterServiceRegistry Registry => s_Current;
-        public static IAdapterServiceRegistry DefaultRegistry => s_Default;
-
-        public static void SetRegistry(IAdapterServiceRegistry registry)
-        {
-            s_Current = registry ?? s_Default;
+            s_Current = provider ?? s_Default;
         }
 
         public static void ResetToDefault()
