@@ -109,7 +109,6 @@ namespace Game.Networking.Adapters
                 return;
 
             EnsureServices();
-            EnsureOwnerRuntime();
 
             double now = _netTime.Now();
             if (!RateLimitOk(now))
@@ -179,14 +178,10 @@ namespace Game.Networking.Adapters
     
                 int sampleCount = 0;
                 var inpList = new List<string>();
-                var ownerInputs = _ownerRuntime?.InputBuffer;
-                if (ownerInputs != null)
+                foreach (var inp in _inputBuf)
                 {
-                    foreach (var inp in ownerInputs)
-                    {
-                        if (sampleCount++ >= 6) break;
-                        inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
-                    }
+                    if (sampleCount++ >= 6) break;
+                    inpList.Add($"{inp.seq}:{inp.dir.x:0.00},{inp.dir.z:0.00}");
                 }
                 if (inpList.Count > 0)
                     tags["input_sample"] = string.Join("|", inpList);
