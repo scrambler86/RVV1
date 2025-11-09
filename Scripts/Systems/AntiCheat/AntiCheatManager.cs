@@ -50,60 +50,19 @@ public class AntiCheatManager : MonoBehaviour, IAntiCheatValidator
     // conteggio dei soft-fail per clientId
     private readonly Dictionary<int, int> _softFailCounts = new Dictionary<int, int>();
 
-    // =====================================================================
-    // 1) Metodo richiesto dall'interfaccia IAntiCheatValidator (senza dt)
-    // =====================================================================
-    // [BOOKMARK: API_NO_DT]
-    public bool ValidateInput(
-        IPlayerNetworkDriver drv,
-        uint seq,
-        double timestamp,
-        Vector3 predictedPos,
-        Vector3 lastServerPos,
-        float maxStepAllowance,
-        Vector3[] pathCorners,
-        bool running)
+    public bool ValidateInput(in AntiCheatInputContext context)
     {
-        // fallback: usiamo Time.fixedDeltaTime come dt lato server
-        float dtServer = Time.fixedDeltaTime;
-        return ValidateInputInternal(
-            drv,
-            seq,
-            timestamp,
-            predictedPos,
-            lastServerPos,
-            maxStepAllowance,
-            pathCorners,
-            running,
-            dtServer
-        );
-    }
+        float dtServer = context.ServerDeltaTime > 0f ? context.ServerDeltaTime : Time.fixedDeltaTime;
 
-    // =====================================================================
-    // 2) Overload usato dal driver quando può passare dtServer
-    //    (NOTA: usa IPlayerNetworkDriver, non il tipo concreto!)
-    // =====================================================================
-    // [BOOKMARK: API_WITH_DT]
-    public bool ValidateInput(
-        IPlayerNetworkDriver drv,
-        uint seq,
-        double timestamp,
-        Vector3 predictedPos,
-        Vector3 lastServerPos,
-        float maxStepAllowance,
-        Vector3[] pathCorners,
-        bool running,
-        float dtServer)
-    {
         return ValidateInputInternal(
-            drv,
-            seq,
-            timestamp,
-            predictedPos,
-            lastServerPos,
-            maxStepAllowance,
-            pathCorners,
-            running,
+            context.Driver,
+            context.Sequence,
+            context.ClientTimestamp,
+            context.ClientPredictedPosition,
+            context.LastServerPosition,
+            context.MaxStepAllowance,
+            context.PathCorners,
+            context.Running,
             dtServer
         );
     }

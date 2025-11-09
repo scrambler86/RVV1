@@ -12,10 +12,12 @@ using Game.Networking.Adapters;
 /// - espone TryGetCellOf(ownerConnection, out (int x,int y))
 /// - thread-unsafe, single-thread server main loop usage
 /// </summary>
-public class ChunkManager : MonoBehaviour
+public class ChunkManager : MonoBehaviour, IChunkInterest
 {
     public int cellSize = 128;
     public int activeRadiusCells = 4;
+
+    public int CellSize => cellSize;
 
     // simple key for cells
     public struct Cell : IEquatable<Cell>
