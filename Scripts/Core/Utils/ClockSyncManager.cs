@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using Game.Networking.Adapters;
 
 namespace Game.Network
 {
@@ -7,7 +8,7 @@ namespace Game.Network
     /// Small client-side clock sync helper using ping/response samples.
     /// Records EMA for offset and RTT; designed to be fed from a ping RPC handshake.
     /// </summary>
-    public class ClockSyncManager : MonoBehaviour
+    public class ClockSyncManager : MonoBehaviour, IClockSync
     {
         // Offset: estimated serverTime - clientTime in seconds (server = client + Offset)
         public double OffsetSeconds { get; private set; } = 0.0;
