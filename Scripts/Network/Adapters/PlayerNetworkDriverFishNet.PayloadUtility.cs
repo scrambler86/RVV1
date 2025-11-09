@@ -1,4 +1,5 @@
-﻿using System;
+﻿// Assets/Scripts/Network/Adapters/PlayerNetworkDriverFishNet.PayloadUtility.cs
+using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using FishNet.Connection;
@@ -9,7 +10,9 @@ namespace Game.Networking.Adapters
 {
     public partial class PlayerNetworkDriverFishNet
     {
+        // ============================================================
         // BOOKMARK: HANDLE_PACKED_SHARD
+        // ============================================================
         void HandlePackedShard(byte[] shard, NetworkConnection sourceConn = null)
         {
             EnsureServices();
@@ -17,20 +20,25 @@ namespace Game.Networking.Adapters
             uint messageId = 0;
             bool isCanary = false;
             byte[] innerShard = shard;
+
+            // Chiave per raggruppare i frammenti appartenenti allo stesso messaggio.
+            // NOTA: ShardBufferKey è un tipo definito altrove in questo progetto.
             ShardBufferKey bufferKey = ShardBufferKey.ForLocalClient(0);
 
+            // Gli shard arrivano sempre dentro una Envelope (flags con bit 0x04 = shard).
             if (EnvelopeUtil.TryUnpack(shard, out var env, out var inner))
             {
                 innerShard = inner;
                 messageId = env.messageId;
-                isCanary = (env.flags & 0x08) != 0;
+                isCanary = (env.flags & 0x08) != 0; // 0x08 = CANARY
 
+                // Se sono su client: ForLocalClient; se sono su server e ho la connessione: ForConnection
                 bufferKey = (IsServerInitialized && sourceConn != null)
                     ? ShardBufferKey.ForConnection(sourceConn, messageId)
                     : ShardBufferKey.ForLocalClient(messageId);
 
                 if (isCanary)
-                    _canaryMessageIds.Add(bufferKey);
+                    _canaryMessageIds.Add(bufferKey); // segno che questo msgId è canary
 
                 if (verboseNetLog)
                 {
@@ -39,17 +47,21 @@ namespace Game.Networking.Adapters
                         $"flags=0x{env.flags:X2} innerFirst8={_packingService.PreviewBytes(inner, 8)}");
                 }
 
+                // Registro hash e length del payload completo per verifica a ricomposizione terminata
                 try
                 {
                     _incomingEnvelopeMeta[bufferKey] = (env.payloadHash, env.payloadLen);
                 }
-                catch { }
+                catch { /* ignore duplicate set */ }
             }
-            else if (verboseNetLog)
+            else
             {
-                Debug.Log($"[Driver.Debug] HandlePackedShard raw first8={_packingService.PreviewBytes(shard, 8)}");
+                // Se capita raw (senza envelope) loggo in verbose e rinuncio.
+                if (verboseNetLog)
+                    Debug.Log($"[Driver.Debug] HandlePackedShard raw first8={_packingService.PreviewBytes(shard, 8)}");
             }
 
+            // Payload shard interno: [total:u16][idx:u16][dataLen:u32][data...]
             if (innerShard == null || innerShard.Length < 8)
                 return;
 
@@ -61,9 +73,10 @@ namespace Game.Networking.Adapters
             if (dataLen < 0 || innerShard.Length < 8 + dataLen)
                 return;
 
-            byte[] data = new byte[dataLen];
+            var data = new byte[dataLen];
             Array.Copy(innerShard, 8, data, 0, dataLen);
 
+            // Se per qualche motivo non avevo un id valido, me ne genero uno volatile
             if (messageId == 0)
                 messageId = (uint)(DateTime.UtcNow.Ticks & 0xFFFFFFFF);
 
@@ -74,6 +87,7 @@ namespace Game.Networking.Adapters
                     : ShardBufferKey.ForLocalClient(messageId);
             }
 
+            // Inserisco/creo la lista di shard attesa per questa chiave
             var list = _shardRegistry.GetOrCreate(bufferKey, total, Time.realtimeSinceStartup);
 
             if (idx < list.Count)
@@ -89,39 +103,40 @@ namespace Game.Networking.Adapters
 
             _telemetry?.Increment("pack.shards_received");
 
-            // Check if all data shards are present or try to recover with FEC
-            bool all = true;
+            // Verifico se ho tutti i data shard
+            bool allPresent = true;
             for (int i = 0; i < list.Count; ++i)
             {
                 if (list[i] == null)
                 {
-                    all = false;
+                    allPresent = false;
                     break;
                 }
             }
 
-            if (!all)
+            // Se non li ho tutti, provo recupero FEC
+            if (!allPresent)
             {
                 int totalShards = list.Count;
                 int parityCount = fecParityShards;
                 int dataShards = Math.Max(1, totalShards - parityCount);
 
-                if (_fecService.TryRecover(list, parityCount, dataShards, fecShardSize, out var recoveredShard))
+                if (_fecService.TryRecover(list, parityCount, dataShards, fecShardSize, out var recovered))
                 {
-                    list[recoveredShard.Index] = recoveredShard;
+                    list[recovered.Index] = recovered;
                     _telemetry?.Increment("pack.shards_recovered");
                 }
                 else
                 {
-                    // Not enough info to reconstruct, wait for more shards
+                    // Attendo altri shard
                     return;
                 }
             }
 
-            // Reassemble payload from data shards
-            int totalShardsFinal = _shardRegistry.GetTotalCount(bufferKey);
+            // Ricompongo payload completo (concatenazione dei soli data shard)
+            int totalFinal = _shardRegistry.GetTotalCount(bufferKey);
             int parityCnt = fecParityShards;
-            int dataCount = Math.Max(1, totalShardsFinal - parityCnt);
+            int dataCount = Math.Max(1, totalFinal - parityCnt);
 
             long payloadLengthLong = 0;
             for (int i = 0; i < dataCount; i++)
@@ -134,16 +149,17 @@ namespace Game.Networking.Adapters
             }
 
             int payloadLength = (int)payloadLengthLong;
-            byte[] payload = new byte[payloadLength];
+            var payload = new byte[payloadLength];
 
             int writePos = 0;
             for (int i = 0; i < dataCount; i++)
             {
-                var sInfo = list[i];
-                Array.Copy(sInfo.Data, 0, payload, writePos, sInfo.DataLength);
-                writePos += sInfo.DataLength;
+                var si = list[i];
+                Array.Copy(si.Data, 0, payload, writePos, si.DataLength);
+                writePos += si.DataLength;
             }
 
+            // Verifica integrità con hash/len ricevuti nella Envelope
             try
             {
                 ulong computed = EnvelopeUtil.ComputeHash64(payload);
@@ -157,7 +173,8 @@ namespace Game.Networking.Adapters
                             $"computedHash=0x{computed:X16} serverHash=0x{meta.hash:X16} " +
                             $"computedLen={payloadLength} serverLen={meta.len}");
 
-                        RequestFullSnapshotFromServer(true);
+                        // Se non abbiamo ancora anchor (niente keyframe), bypassiamo il cooldown
+                        RequestFullSnapshotFromServer(preferNoFec: true, bypassCooldown: !_haveAnchor);
                     }
                     else if (verboseNetLog)
                     {
@@ -172,8 +189,10 @@ namespace Game.Networking.Adapters
                     $"[Driver.Warning] Failed to verify shard hash id={messageId}: {ex.Message}");
             }
 
+            // Pulizia strutture legate a questa chiave
             CleanupShardBuffer(bufferKey);
 
+            // Se era un canary, non decodifico come movimento
             if (isCanary)
             {
                 if (verboseNetLog)
@@ -181,58 +200,72 @@ namespace Game.Networking.Adapters
                 return;
             }
 
+            // Decodifica movimento/ancora
             HandlePackedPayload(payload);
         }
 
+        // ============================================================
         // BOOKMARK: SHARD_BUFFER_CLEANUP
+        // ============================================================
         void CleanupShardBuffer(ShardBufferKey key)
         {
             _shardRegistry.Forget(key);
+            _incomingEnvelopeMeta.Remove(key);
+            _canaryMessageIds.Remove(key);
         }
 
+        // ============================================================
         // BOOKMARK: SHARD_BUFFER_TIMEOUTS
+        // ============================================================
         void CheckShardBufferTimeouts()
         {
             double now = Time.realtimeSinceStartup;
             _shardRegistry.CollectExpired(now, SHARD_BUFFER_TIMEOUT_SECONDS, _shardTimeoutScratch);
 
-            foreach (var id in _shardTimeoutScratch)
+            foreach (var key in _shardTimeoutScratch)
             {
                 _telemetry?.Increment("pack.shards_timeout");
-                RequestFullSnapshotFromServer(true);
-                CleanupShardBuffer(id);
-                _incomingEnvelopeMeta.Remove(id);
-                _canaryMessageIds.Remove(id);
+                // Se non ho ancora un anchor, bypasso il cooldown per ottenere subito un keyframe
+                RequestFullSnapshotFromServer(preferNoFec: true, bypassCooldown: !_haveAnchor);
+                CleanupShardBuffer(key);
             }
 
             _shardTimeoutScratch.Clear();
         }
 
+        // ============================================================
         // BOOKMARK: HANDLE_PACKED_PAYLOAD
+        // ============================================================
         void HandlePackedPayload(byte[] payload)
         {
+            // Per i FULL generici inviamo anche l'hash calcolato lato client sul payload,
+            // così possiamo confrontarlo con quello inviato a TargetPackedSnapshotTo (opzionale).
             ulong h = ComputeStateHashFromPayload(payload);
             HandlePackedPayload(payload, h);
         }
 
+        // ============================================================
         // BOOKMARK: HANDLE_PACKED_PAYLOAD_WITH_HASH
+        // ============================================================
         void HandlePackedPayload(byte[] payload, ulong serverStateHash)
         {
             MovementSnapshot snap;
             int cs = _chunk ? _chunk.cellSize : 128;
 
+            // Provo a fare l’unpack (aggiorna anche anchor se presente nel payload)
             if (!PackedMovement.TryUnpack(payload, cs,
                     ref _haveAnchor, ref _anchorCellX, ref _anchorCellY,
                     ref _baseSnap, out snap))
             {
-                ReportCrcFailureOncePerWindow(
-                    "[PackedMovement] CRC mismatch or unpack failure detected");
+                // CRC o layout errato: chiedo un FULL (noFEC) per riallineo
+                ReportCrcFailureOncePerWindow("[PackedMovement] CRC mismatch or unpack failure detected");
                 _telemetry?.Increment("pack.unpack_fail");
-                RequestFullSnapshotFromServer(true);
+
+                RequestFullSnapshotFromServer(preferNoFec: true, bypassCooldown: !_haveAnchor);
                 return;
             }
 
-            // ordered insert by serverTime
+            // Inserimento ordinato nel buffer per tempo server
             if (_buffer.Count == 0 || snap.serverTime >= _buffer[_buffer.Count - 1].serverTime)
             {
                 _buffer.Add(snap);
@@ -252,6 +285,7 @@ namespace Game.Networking.Adapters
             if (_buffer.Count > 256)
                 _buffer.RemoveAt(0);
 
+            // Aggiorno stime di ritardo e jitter per calcolo back-buffer target
             double now = _netTime.Now();
             double delay = Math.Max(0.0, now - snap.serverTime);
 
@@ -272,6 +306,7 @@ namespace Game.Networking.Adapters
             if (_back <= 0.0)
                 _back = _backTarget;
 
+            // Verifica coerenza stato (hash client vs "serverStateHash" allegato dove possibile)
             ulong clientHash = ComputeStateHashForSnapshot(snap);
             if (clientHash != serverStateHash)
             {
@@ -289,15 +324,19 @@ namespace Game.Networking.Adapters
 
                 _telemetry?.Increment($"client.{OwnerClientId}.statehash_mismatch");
 
-                RequestFullSnapshotFromServer(true);
+                // Con anchor assente bypasso cooldown, altrimenti rispetto la finestra
+                RequestFullSnapshotFromServer(preferNoFec: true, bypassCooldown: !_haveAnchor);
             }
             else
             {
+                // Tutto ok: azzero finestra errori “full request” (auto-guarigione riuscita)
                 NoteSuccessfulSnapshotDelivery();
             }
         }
 
+        // ============================================================
         // BOOKMARK: REQUEST_FULL_SNAPSHOT_SERVER_RPC
+        // ============================================================
         [ServerRpc(RequireOwnership = false)]
         void RequestFullSnapshotServerRpc(bool preferNoFec)
         {
@@ -311,8 +350,9 @@ namespace Game.Networking.Adapters
                 return;
 
             if (preferNoFec)
-                SuppressFecTemporarily(conn);
+                SuppressFecTemporarily(conn); // Disabilita FEC per un breve tempo
 
+            // Costruisco uno snapshot FULL minimale coerente con lo stato server
             Vector3 pos = _serverLastPos;
             Vector3 vel = Vector3.zero;
             double now = _netTime.Now();
@@ -347,8 +387,7 @@ namespace Game.Networking.Adapters
                 foreach (var s in shards)
                 {
                     if (verboseNetLog)
-                        Debug.Log(
-                            $"[Server.Debug] Shard idx? shardLen={s.Length} first8={_packingService.PreviewBytes(s, 8)}");
+                        Debug.Log($"[Server.Debug] Shard idx? shardLen={s.Length} first8={_packingService.PreviewBytes(s, 8)}");
 
                     byte[] envelopeBytes =
                         CreateEnvelopeBytesForShard(s, messageId, fullLen, fullHash);
@@ -365,25 +404,39 @@ namespace Game.Networking.Adapters
             _telemetry?.Increment($"client.{OwnerClientId}.full_requested_by_client");
         }
 
-        // BOOKMARK: REQUEST_FULL_SNAPSHOT_FROM_SERVER
-        void RequestFullSnapshotFromServer(bool preferNoFec = false)
+        // ============================================================
+        // BOOKMARK: REQUEST_FULL_SNAPSHOT_FROM_SERVER_OVERLOAD
+        // ============================================================
+        /// <summary>
+        /// Richiede un FULL al server. Se <paramref name="bypassCooldown"/> è true (o se manca l'anchor),
+        /// ignora il cooldown per ottenere immediatamente un keyframe di riallineamento.
+        /// </summary>
+        void RequestFullSnapshotFromServer(bool preferNoFec = false, bool bypassCooldown = false)
         {
             double now = Time.realtimeSinceStartup;
 
             EnsureServices();
 
-            if (now - _lastFullRequestTime < FULL_REQUEST_COOLDOWN_SECONDS)
+            // Se manca anchor, forzo il bypass per non restare bloccato finché aspettiamo il cooldown
+            if (!bypassCooldown && !_haveAnchor)
+                bypassCooldown = true;
+
+            if (!bypassCooldown)
             {
-                if (verboseNetLog)
+                if (now - _lastFullRequestTime < FULL_REQUEST_COOLDOWN_SECONDS)
                 {
-                    Debug.Log(
-                        $"[Driver.Debug] Full snapshot request suppressed due to cooldown ({now - _lastFullRequestTime:0.###}s)");
+                    if (verboseNetLog)
+                    {
+                        Debug.Log(
+                            $"[Driver.Debug] Full snapshot request suppressed due to cooldown ({now - _lastFullRequestTime:0.###}s)");
+                    }
+                    return;
                 }
-                return;
             }
 
             _lastFullRequestTime = now;
 
+            // Finestra di osservazione per “troppe richieste”: dopo soglia disabilito FEC per tentare un passaggio “pulito”
             if (now - _fullRequestWindowStart > FULL_REQUEST_WINDOW_SECONDS)
             {
                 _fullRequestWindowStart = now;
@@ -402,7 +455,9 @@ namespace Game.Networking.Adapters
             RequestFullSnapshotServerRpc(preferNoFec);
         }
 
+        // ============================================================
         // BOOKMARK: NOTE_SUCCESSFUL_SNAPSHOT
+        // ============================================================
         void NoteSuccessfulSnapshotDelivery()
         {
             _fullRequestWindowCount = 0;
@@ -410,9 +465,12 @@ namespace Game.Networking.Adapters
             _fullRequestWindowStart = Time.realtimeSinceStartup;
         }
 
+        // ============================================================
         // BOOKMARK: STATE_HASH_UTILS
+        // ============================================================
         static ulong ComputeStateHashForSnapshot(MovementSnapshot s)
         {
+            // Hash solo dei campi rilevanti (tempo, pos.xz, vel.xz, seq) per coerenza client/server
             Span<byte> buf = stackalloc byte[8 * 6];
             BitConverter.TryWriteBytes(buf.Slice(0, 8), BitConverter.DoubleToInt64Bits(s.serverTime));
             BitConverter.TryWriteBytes(buf.Slice(8, 8), BitConverter.DoubleToInt64Bits(s.pos.x));
@@ -437,8 +495,9 @@ namespace Game.Networking.Adapters
             }
         }
 
-        // BOOKMARK: BUILD_FEC_SHARDS
+        // ============================================================
         // BOOKMARK: INTERP_HELPERS
+        // ============================================================
         static Vector3 Hermite(Vector3 p0, Vector3 v0, Vector3 p1, Vector3 v1, float t)
         {
             float t2 = t * t;

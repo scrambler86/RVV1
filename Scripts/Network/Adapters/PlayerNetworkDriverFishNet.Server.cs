@@ -516,9 +516,15 @@ namespace Game.Networking.Adapters
             }
 
             int cs = _chunk ? _chunk.cellSize : 128;
-            return PackedMovement.PackFull(
+
+            // BOOKMARK: PACK_FULL_FOR_OBSERVERS_ENVELOPE (REPLACE)
+            // Prima restituiva il RAW (causando envelope=False nei log).
+            // Ora wrappiamo SEMPRE nel percorso envelope.
+            byte[] rawFull = PackedMovement.PackFull(
                 snap.pos, snap.vel, snap.animState, snap.serverTime,
                 snap.seq, cx, cy, cs);
+
+            return CreateEnvelopeBytes(rawFull);
         }
 
         void TrySendPackedTo(NetworkConnection conn,
@@ -535,6 +541,11 @@ namespace Game.Networking.Adapters
                 return;
 
             bool sendFull = false;
+
+            // BOOKMARK: TRY_SEND_FIRST_FULL_FOR_NEW_CONN (ADD)
+            // Se non abbiamo mai inviato nulla a questa connessione → FULL obbligatorio.
+            if (!_lastSentSnap.ContainsKey(conn))
+                sendFull = true;
 
             if (!_lastSentCell.TryGetValue(conn, out var lastCell))
                 sendFull = true;
@@ -643,6 +654,11 @@ namespace Game.Networking.Adapters
         void ObserversPackedSnapshot(byte[] payload)
         {
             if (_shuttingDown || s_AppQuitting)
+                return;
+
+            // BOOKMARK: OBSERVERS_EARLY_RETURN_OWNER (ADD)
+            // L'owner non deve processare i delta degli observers del proprio oggetto.
+            if (IsOwner)
                 return;
 
             EnsureServices();

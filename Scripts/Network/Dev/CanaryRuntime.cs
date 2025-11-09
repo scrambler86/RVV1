@@ -6,7 +6,13 @@ using FishNet.Object;
 using FishNet.Connection;
 using Game.Networking.Adapters;
 
-// CanaryRuntime: invia payload di test (canary) ai client per verificare integrità del trasporto.
+/// <summary>
+/// CanaryRuntime: invia payload di test (canary) ai client per verificare integrità del trasporto.
+/// - Supporta invio FULL o SHARD + (eventuale) FEC parity (qui generi solo data+parity via FecReedSolomon).
+/// - Ogni pacchetto è SEMPRE wrappato in EnvelopeUtil.Pack con i flag corretti:
+///     - FLAG_IS_CANARY per distinguerlo dai pacchetti movimento.
+///     - FLAG_IS_SHARD per le shard (così TryUnpack non pretende il fullLen nel buffer).
+/// </summary>
 public class CanaryRuntime : NetworkBehaviour
 {
     [Header("Canary")]
@@ -79,38 +85,33 @@ public class CanaryRuntime : NetworkBehaviour
     {
         if (!enabledRuntime)
         {
-            if (verboseLogs)
-                Debug.Log("[Canary] BroadcastOnce: runtime disabled.");
+            if (verboseLogs) Debug.Log("[Canary] BroadcastOnce: runtime disabled.");
             return;
         }
 
         if (!IsServerInitialized)
         {
-            if (verboseLogs)
-                Debug.Log("[Canary] BroadcastOnce: IsServerInitialized = false. Sei sicuro di essere Host/Server?");
+            if (verboseLogs) Debug.Log("[Canary] BroadcastOnce: IsServerInitialized = false. Sei sicuro di essere Host/Server?");
             return;
         }
 
         var sm = InstanceFinder.ServerManager;
         if (sm == null)
         {
-            if (verboseLogs)
-                Debug.LogWarning("[Canary] BroadcastOnce: ServerManager nullo.");
+            if (verboseLogs) Debug.LogWarning("[Canary] BroadcastOnce: ServerManager nullo.");
             return;
         }
 
         var dict = sm.Clients;
         if (dict == null)
         {
-            if (verboseLogs)
-                Debug.LogWarning("[Canary] BroadcastOnce: Clients dict nullo.");
+            if (verboseLogs) Debug.LogWarning("[Canary] BroadcastOnce: Clients dict nullo.");
             return;
         }
 
         if (dict.Count == 0)
         {
-            if (verboseLogs)
-                Debug.Log("[Canary] BroadcastOnce: nessun client connesso (Host incluso).");
+            if (verboseLogs) Debug.Log("[Canary] BroadcastOnce: nessun client connesso (Host incluso).");
             return;
         }
 
@@ -122,8 +123,7 @@ public class CanaryRuntime : NetworkBehaviour
             var conn = kv.Value;
             if (conn == null)
             {
-                if (verboseLogs)
-                    Debug.LogWarning("[Canary] BroadcastOnce: connection null, skip.");
+                if (verboseLogs) Debug.LogWarning("[Canary] BroadcastOnce: connection null, skip.");
                 continue;
             }
 
@@ -135,56 +135,57 @@ public class CanaryRuntime : NetworkBehaviour
     {
         if (!IsServerInitialized)
         {
-            if (verboseLogs)
-                Debug.Log("[Canary] SendCanaryTo: IsServerInitialized=false, skip.");
+            if (verboseLogs) Debug.Log("[Canary] SendCanaryTo: IsServerInitialized=false, skip.");
             return;
         }
 
         if (conn == null)
         {
-            if (verboseLogs)
-                Debug.LogWarning("[Canary] SendCanaryTo: conn null, skip.");
+            if (verboseLogs) Debug.LogWarning("[Canary] SendCanaryTo: conn null, skip.");
             return;
         }
 
         if (_canaryPayload == null)
         {
-            if (verboseLogs)
-                Debug.LogWarning("[Canary] SendCanaryTo: _canaryPayload null, skip.");
+            if (verboseLogs) Debug.LogWarning("[Canary] SendCanaryTo: _canaryPayload null, skip.");
             return;
         }
 
         var driver = FindObjectOfType<PlayerNetworkDriverFishNet>();
         if (driver == null)
         {
-            if (verboseLogs)
-                Debug.LogWarning("[Canary] PlayerNetworkDriverFishNet non trovato in scena, annullo invio.");
+            if (verboseLogs) Debug.LogWarning("[Canary] PlayerNetworkDriverFishNet non trovato in scena, annullo invio.");
             return;
         }
 
-        if (shards && parity > 0)
+        // Metadati FULL per header
+        ulong fullHash = EnvelopeUtil.ComputeHash64(_canaryPayload);
+        int fullLen = _canaryPayload.Length;
+
+        if (shards && parity >= 0)
         {
-            // Usa FEC per shard canary; marca come CANARY per evitare decoding come movimento.
+            // Genera shard (data + parity) con FEC helper
             List<byte[]> sList = FecReedSolomon.BuildShards(_canaryPayload, shardSize, parity);
 
-            ulong fullHash = EnvelopeUtil.ComputeHash64(_canaryPayload);
-            int fullLen = _canaryPayload.Length;
-            uint seq = (uint)Environment.TickCount;
+            // Usa un SOLO messageId per tutto il gruppo shard
             uint messageId = (uint)(DateTime.UtcNow.Ticks & 0xFFFFFFFF);
+            // seq non critico, mettiamo un contatore temporale
+            uint seq = (uint)Environment.TickCount;
 
             for (int i = 0; i < sList.Count; i++)
             {
                 var shardBytes = sList[i];
+
                 var env = new Envelope
                 {
                     messageId = messageId,
                     seq = seq,
-                    payloadLen = fullLen,
-                    payloadHash = fullHash,
-                    // 0x08 = CANARY, 0x04 = shard.
-                    flags = 0x08 | 0x04
+                    payloadLen = fullLen,          // len del FULL nel header
+                    payloadHash = fullHash,         // hash del FULL nel header
+                    flags = (byte)(EnvelopeUtil.FLAG_IS_CANARY | EnvelopeUtil.FLAG_IS_SHARD)
                 };
-                var packed = EnvelopeUtil.Pack(env, shardBytes);
+
+                byte[] packed = EnvelopeUtil.Pack(env, shardBytes);
                 driver.SendPackedShardToClient(conn, packed);
             }
 
@@ -193,17 +194,20 @@ public class CanaryRuntime : NetworkBehaviour
         }
         else
         {
+            // FULL: invia il payload completo in envelope canary
+            uint messageId = (uint)(DateTime.UtcNow.Ticks & 0xFFFFFFFF);
             uint seq = (uint)Environment.TickCount;
+
             var env = new Envelope
             {
-                messageId = (uint)(DateTime.UtcNow.Ticks & 0xFFFFFFFF),
+                messageId = messageId,
                 seq = seq,
                 payloadLen = _canaryPayload.Length,
-                payloadHash = EnvelopeUtil.ComputeHash64(_canaryPayload),
-                // 0x08 = CANARY, 0x01 = snapshot/full.
-                flags = 0x08 | 0x01
+                payloadHash = fullHash,
+                flags = EnvelopeUtil.FLAG_IS_CANARY
             };
-            var packed = EnvelopeUtil.Pack(env, _canaryPayload);
+
+            byte[] packed = EnvelopeUtil.Pack(env, _canaryPayload);
             driver.SendPackedSnapshotToClient(conn, packed, env.payloadHash);
 
             if (verboseLogs)
